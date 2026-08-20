@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+dist/
+offline-cache/
+
+# 本地备份（内部文档/截图，不随开源发布）
+_backups/
+
+# 日志与临时文件
+*.log
+*.tmp
+*.part
+
+# 开发截图
+*.png
+!assets/**/*.png
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 系统
+Thumbs.db
+.DS_Store

@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:;">
+  <title></title>
+  <link rel="stylesheet" href="style.v3.css">
+</head>
+<body>
+  <!-- 自绘无边框标题栏：全程序唯一标题 + 窗口控制 -->
+  <header class="titlebar" id="titlebar">
+    <div class="tb-drag">
+      <img class="tb-logo" src="../assets/icon.png" alt="ZAT">
+      <div class="tb-brand">
+        <span class="tb-app">ZAT-DSH 启动器</span>
+        <span class="tb-ver">v<span id="version">1.0.0</span> · DeepSeek Harness</span>
+      </div>
+    </div>
+    <div class="tb-right">
+      <span class="pill" id="titlebar-pill">就绪</span>
+      <span class="clock" id="clock">--:--:--</span>
+      <div class="win-controls">
+        <button class="win-btn" id="btn-min" title="最小化" aria-label="最小化">
+          <svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg>
+        </button>
+        <button class="win-btn" id="btn-max" title="最大化 / 还原" aria-label="最大化">
+          <svg class="ico-max" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+          <svg class="ico-restore" viewBox="0 0 24 24"><path d="M9 6V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-1M5 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z"/></svg>
+        </button>
+        <button class="win-btn win-close" id="btn-close" title="关闭" aria-label="关闭">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <!-- 左栏：运行状态 + 环境 -->
+    <aside class="side-panel">
+      <div class="side-status">
+        <div class="status-orbit" id="status-orbit">
+          <img class="donate-qr" id="donate-qr" src="../assets/donate-qr.png" alt="打赏二维码">
+        </div>
+        <span class="donate-text" id="donate-text">觉得还可以欢迎打赏，多了不嫌多，少了不嫌少~嘿嘿</span>
+        <div class="side-copy">
+          <span class="eyebrow">SYSTEM</span>
+          <strong id="status-text">正在检测…</strong>
+          <span id="status-detail">正在读取 DSH 运行状态</span>
+        </div>
+      </div>
+      <span class="foot-state" id="footer-state">○ 未运行</span>
+      <div class="side-rule"></div>
+      <div class="side-mascot"><img id="mascot-img" src="../assets/dafeiyu/idle_front_238.png" alt="DeepSeek 大肥鱼"></div>
+      <div class="side-meta terminal-section">
+        <span class="terminal-label">终端</span>
+        <div class="terminal-picker">
+          <div class="terminal-select-wrap" id="terminal-select-wrap">
+            <button class="env-switch" id="env-switch" title="点击切换 DSH 终端" aria-label="切换 DSH 终端" aria-haspopup="listbox">
+              <span class="env-switch-value" id="env-switch-value">…</span>
+              <span class="terminal-select-arrow" aria-hidden="true"></span>
+            </button>
+          </div>
+          <div class="env-menu" id="env-menu" role="listbox" hidden></div>
+          <button class="terminal-icon-btn add" id="btn-add-terminal" title="添加终端" aria-label="添加终端"><span aria-hidden="true">+</span></button>
+          <button class="terminal-icon-btn remove" id="btn-remove-terminal" title="删除当前终端" aria-label="删除当前终端"><span aria-hidden="true">−</span></button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 右区：控制按钮 + 单一标签卡片（标签与内容一体） -->
+    <section class="main-panel">
+      <section class="action-panel">
+        <div class="control-copy">
+          <span class="eyebrow">HARNESS</span>
+          <strong>运行控制</strong>
+        </div>
+        <div class="control-actions">
+          <button class="btn btn-primary" id="btn-start">▶ 启动</button>
+          <button class="btn btn-ghost" id="btn-stop">■ 停止</button>
+          <button class="btn btn-ghost" id="btn-restart">↻ 重启</button>
+          <button class="btn btn-ghost" id="btn-open">↗ 打开网页</button>
+        </div>
+      </section>
+
+      <!-- 标签 + 内容放在同一张卡片里，按钮紧贴对应内容 -->
+      <section class="card-frame">
+        <nav class="tabs" id="tabs">
+          <button class="tab active" data-tab="console">控制台</button>
+          <button class="tab" data-tab="env">环境</button>
+          <button class="tab" data-tab="rescue">救援</button>
+          <span class="tab-indicator" id="tab-indicator"></span>
+        </nav>
+        <div class="content" id="content">
+          <!-- 空终端状态页：新环境尚未安装 DSH 时显示 -->
+          <div class="panel" data-panel="empty" id="empty-panel">
+            <div class="empty-state">
+              <div class="empty-icon">⬇</div>
+              <strong class="empty-title">这个终端环境还没有安装 DSH</strong>
+              <span class="empty-desc" id="empty-desc">选择安装方式，把 DeepSeek Harness 装到这个独立环境里（官方最新版，即装即用）。</span>
+              <div class="empty-actions">
+                <button class="btn btn-primary" id="empty-install">一键安装</button>
+                <button class="btn btn-ghost" id="empty-scan">自动扫描已有 DSH</button>
+                <button class="btn btn-ghost" id="empty-manual">手动选择 DSH 目录</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel active" data-panel="console">
+            <div class="panel-heading">
+              <div><strong>运行日志</strong><span class="muted" id="log-count">0 条</span></div>
+              <div class="toolbar-actions">
+                <label class="mini-check"><input type="checkbox" id="check-autoscroll" checked> 自动滚动</label>
+                <button class="btn btn-mini" id="btn-copy-log">复制</button>
+                <button class="btn btn-mini" id="btn-clear-log">清空</button>
+              </div>
+            </div>
+            <div class="log-box" id="log-box" aria-live="polite"></div>
+          </div>
+          <div class="panel" data-panel="env">
+            <div class="panel-heading">
+              <div><strong>环境配置</strong><span class="muted">DSH 本地运行条件</span></div>
+            </div>
+            <div class="harness-version" id="harness-version-block">
+              <div class="harness-version-copy">
+                <div><strong>Harness 本体</strong><span class="version-badge" id="harness-version">检测中</span><span class="update-badge" id="harness-update-badge" hidden></span></div>
+                <span class="muted" id="harness-update-detail">正在读取当前终端版本</span>
+              </div>
+              <div class="harness-update-actions">
+                <button class="btn btn-ghost" id="btn-check-update">检查更新</button>
+                <button class="btn btn-primary" id="btn-install-update" disabled>安装更新</button>
+              </div>
+            </div>
+            <div class="harness-version" id="engine-status-block">
+              <div class="harness-version-copy">
+                <div><strong>插件商店 (zat-dsh-engine)</strong><span class="version-badge" id="engine-status">检测中…</span><span class="update-badge" id="engine-update-badge" hidden></span></div>
+                <span class="muted" id="engine-status-detail">打开或切换终端时自动检测</span>
+              </div>
+              <div class="harness-update-actions">
+                <button class="btn btn-ghost" id="btn-engine-check">检查更新</button>
+                <button class="btn btn-primary" id="btn-engine-inject">注入插件商店</button>
+              </div>
+            </div>
+            <div class="harness-version" id="launcher-update-block">
+              <div class="harness-version-copy">
+                <div><strong>ZAT-DSH 启动器</strong><span class="version-badge" id="launcher-version">v1.0.0</span><span class="update-badge" id="launcher-update-badge" hidden></span></div>
+                <span class="muted" id="launcher-update-detail">启动器更新自动检查</span>
+              </div>
+              <div class="harness-update-actions">
+                <button class="btn btn-ghost" id="btn-launcher-check-update">检查更新</button>
+              </div>
+            </div>
+            <div class="env-actions">
+              <button class="btn btn-primary" id="btn-check-env">一键检测</button>
+              <button class="btn btn-ghost" id="btn-repair-env">一键修复</button>
+              <button class="btn btn-ghost" id="btn-choose-dsh">选择 DSH 目录</button>
+            </div>
+            <span class="muted env-path" id="env-dsh-path"></span>
+            <div class="env-grid" id="env-grid"></div>
+          </div>
+          <div class="panel" data-panel="rescue">
+            <div class="panel-heading">
+              <div><strong>救援</strong><span class="muted">崩溃诊断 / 一键恢复 / 排除崩溃插件（每终端独立）</span></div>
+            </div>
+            <div class="harness-version" id="rescue-status-block">
+              <div class="harness-version-copy">
+                <div><strong>救援点</strong><span class="version-badge" id="rescue-status">无救援点</span></div>
+                <span class="muted" id="rescue-status-detail">DSH 每次成功启动后自动更新；也可手动锁定</span>
+              </div>
+              <div class="harness-update-actions">
+                <button class="btn btn-ghost" id="btn-rescue-create">创建救援点</button>
+                <button class="btn btn-primary" id="btn-rescue-restore" disabled>一键救援</button>
+              </div>
+            </div>
+            <div class="harness-version" id="rescue-diagnose-block">
+              <div class="harness-version-copy">
+                <div><strong>崩溃诊断</strong></div>
+                <span class="muted" id="rescue-diagnose-detail">从本终端启动日志找出崩溃原因，定位坏插件后可直接排除</span>
+              </div>
+              <div class="harness-update-actions">
+                <button class="btn btn-primary" id="btn-rescue-diagnose">一键检测</button>
+                <button class="btn btn-ghost" id="btn-rescue-copy-log" hidden>复制完整记录</button>
+              </div>
+            </div>
+            <div class="rescue-issues" id="rescue-issues"></div>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="modal-mask" id="modal-mask" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-title" id="modal-title">确认操作</div>
+      <div class="modal-message" id="modal-message"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="modal-cancel">取消</button>
+        <button class="btn btn-primary" id="modal-ok">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 添加终端向导 -->
+  <div class="wizard-mask" id="wizard-mask" hidden>
+    <div class="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title">
+      <div class="wizard-head">
+        <div class="wizard-title-copy">
+          <span class="eyebrow">ADD TERMINAL</span>
+          <strong class="wizard-title" id="wizard-title">添加终端</strong>
+        </div>
+        <button class="wizard-close" id="wizard-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="wizard-body" id="wizard-body"></div>
+      <div class="wizard-foot">
+        <button class="btn btn-ghost" id="wizard-back" hidden>返回</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

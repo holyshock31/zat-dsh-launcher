@@ -1,0 +1,888 @@
+'use strict'
+
+/* 全新安装管道：官方预构建包下载（npm registry）+ 可选镜像回退 + 失败清理。
+ * 主路径 = npm 安装官方预构建包 @deepseek-ai/dsh（lib/bin.js 直接可用，零编译）。
+ * 纯逻辑 + 可注入执行器，便于单元测试；不触碰任何外部 DSH 目录。 */
+
+const fs = require('node:fs')
+const path = require('node:path')
+const os = require('node:os')
+const { execFile, spawn } = require('node:child_process')
+const { EventEmitter } = require('node:events')
+const { updateSources } = require('./harness-update')
+
+const DSH_ORIGIN = 'https://github.com/deepseek-ai/deepseek-harness.git'
+const DSH_NPM_PACKAGE = '@deepseek-ai/dsh'
+const DSH_NPM_TAG = 'latest'
+const NPM_REGISTRIES = [
+  'https://registry.npmjs.org/',
+  'https://registry.npmmirror.com/',
+]
+const PNPM_MIRRORS = [
+  'https://registry.npmjs.org/pnpm/-/pnpm-{version}.tgz',
+  'https://registry.npmmirror.com/pnpm/-/pnpm-{version}.tgz',
+]
+const SOURCE_TIMEOUT_MS = 3000
+
+// 执行器归一化：file 可为 { file, args } 对象（executablePnpm 的返回值），展开为 file+args。
+// Node 24 无 shell 时 execFile(.cmd) 直接 EINVAL，pnpm 一律用 node <cjs> / .exe 形态。
+function normalizeExec(file, args) {
+  if (file && typeof file === 'object' && typeof file.file === 'string') {
+    return { file: file.file, args: [...(file.args || []), ...args] }
+  }
+  return { file, args }
+}
+
+function run(file, args, cwd, timeout = 120000, env) {
+  return new Promise(resolve => {
+    const n = normalizeExec(file, args)
+    const opts = { cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout }
+    if (env) opts.env = env
+    execFile(n.file, n.args, opts, (error, stdout, stderr) => {
+      resolve({ ok: !error, code: error && error.code || 0, out: String(stdout || ''), err: String(stderr || error && error.message || '') })
+    })
+  })
+}
+
+// 带进度的执行：stdout/stderr 按行转发到 onProgress；env 可注入子进程环境（如把 node 目录加进 PATH）
+function runWithProgress(description, file, args, cwd, onProgress, timeout = 600000, env) {
+  return new Promise(resolve => {
+    const n = normalizeExec(file, args)
+    const opts = { cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout }
+    if (env) opts.env = env
+    const child = execFile(n.file, n.args, opts, (error, stdout, stderr) => {
+      resolve({ ok: !error, code: error && error.code || 0, out: String(stdout || ''), err: String(stderr || error && error.message || '') })
+    })
+    const pump = stream => {
+      if (!stream) return
+      let pending = ''
+      stream.on('data', chunk => {
+        pending += chunk.toString()
+        const lines = pending.split(/\r?\n/)
+        pending = lines.pop() || ''
+        for (let line of lines) {
+          line = line.trim()
+          if (line && onProgress) onProgress(description, line)
+        }
+      })
+      stream.on('end', () => { if (pending.trim() && onProgress) onProgress(description, pending.trim()) })
+    }
+    if (child.stdout) pump(child.stdout)
+    if (child.stderr) pump(child.stderr)
+  })
+}
+
+// 只读探测某个 git 源是否 3 秒内可达
+async function probeSource(source, execute = run, timeoutMs = SOURCE_TIMEOUT_MS) {
+  try {
+    const r = await execute('git', ['ls-remote', '--heads', source], null, timeoutMs)
+    return r.ok
+  } catch { return false }
+}
+
+// 依次探测官方 + 国内镜像，返回第一个 3 秒内可达的源（无则返回官方兜底）
+async function reachableSource(origin, onProgress, execute = run) {
+  const sources = updateSources(origin)
+  if (onProgress) onProgress('网络', `探测 ${sources.length} 个下载源…`)
+  for (const source of sources) {
+    if (onProgress) onProgress('网络', source)
+    if (await probeSource(source, execute)) return source
+  }
+  if (onProgress) onProgress('网络', '全部源超时，回退官方源重试')
+  return sources[0]
+}
+
+// 浅克隆 DSH 源码到 targetDir（官方优先，镜像回退，纯进度）
+// execute 兼容 runWithProgress 签名：(description, file, args, cwd, onProgress, timeout) → {ok,...}
+// probeExecute 兼容 run 签名：(file, args, cwd, timeout) → {ok,...}，用于 3 秒源探测
+async function downloadDshTo(targetDir, onProgress, execute = runWithProgress, probeExecute = run) {
+  if (fs.existsSync(targetDir) && fs.readdirSync(targetDir).length) {
+    if (onProgress) onProgress('下载', `目录已存在（${targetDir}），跳过克隆`)
+    return { ok: true, dir: targetDir, skipped: true }
+  }
+  fs.mkdirSync(path.dirname(targetDir), { recursive: true })
+  const source = await reachableSource(DSH_ORIGIN, onProgress, probeExecute)
+  if (onProgress) onProgress('下载', `从 ${source} 克隆 DSH（depth 1）…`)
+  const tmp = `${targetDir}.cloning`
+  fs.rmSync(tmp, { recursive: true, force: true })
+  const r = await execute('下载', 'git', ['clone', '--depth', '1', '--single-branch', source, tmp], undefined, onProgress, 20 * 60 * 1000)
+  if (!r.ok) {
+    fs.rmSync(tmp, { recursive: true, force: true })
+    const detail = (r.err || r.out || '').trim().split(/\r?\n/).pop()
+    return { ok: false, message: `克隆失败（${source}）：${detail || r.err || '未知错误'}` }
+  }
+  if (!fs.existsSync(path.join(tmp, 'package.json'))) {
+    fs.rmSync(tmp, { recursive: true, force: true })
+    return { ok: false, message: '克隆结果缺少 package.json，已清理' }
+  }
+  try { fs.renameSync(tmp, targetDir) } catch (err) {
+    fs.rmSync(tmp, { recursive: true, force: true })
+    return { ok: false, message: `克隆完成但移动目录失败：${err.message}` }
+  }
+  if (onProgress) onProgress('下载', 'DSH 源码下载完成')
+  return { ok: true, dir: targetDir }
+}
+
+// 定位已有 pnpm；工具目录已自举则优先复用（缓存），否则找系统 pnpm；都没有时从 npm 镜像自举
+async function ensurePnpm({ nodeExe, toolsDir, onProgress, execute = run }) {
+  const version = '11.7.0'
+  const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+  const pnpmCjs = path.join(dir, 'pnpm.cjs')
+  if (fs.existsSync(pnpmCjs)) { if (onProgress) onProgress('依赖', `使用自举缓存 pnpm：${pnpmCjs}`); return pnpmCjs }
+  const existing = findPnpm()
+  if (existing) { if (onProgress) onProgress('依赖', `使用已安装 pnpm：${existing}`); return existing }
+  fs.mkdirSync(dir, { recursive: true })
+  let lastUrl = ''
+  for (let i = 0; i < PNPM_MIRRORS.length; i++) {
+    const url = PNPM_MIRRORS[i].replace('{version}', version)
+    if (onProgress) onProgress('依赖', `下载 pnpm@${version}（${i + 1}/${PNPM_MIRRORS.length}）…`)
+    lastUrl = url
+    const ok = await downloadPnpmTgz(url, dir, version, onProgress)
+    if (ok && fs.existsSync(pnpmCjs)) return pnpmCjs
+  }
+  if (onProgress) onProgress('依赖', `pnpm 自举失败：${lastUrl}`)
+  throw new Error('无法自举 pnpm（npm 源均不可用）')
+}
+
+function findPnpm() {
+  // 只认 .cjs / .exe：Node 24 的 execFile/spawn 对 .cmd 在无 shell 下直接 EINVAL，
+  // 且 zat-tools 里的 pnpm.cmd 包装可能引用已消失的 node/pnpm.cjs（残留垃圾）。
+  // .cjs 由 executablePnpm 用 node 直接执行；.exe 系统 pnpm 优先（本机 11.22.0）。
+  const candidates = [
+    // 白板原则：启动器自举缓存优先（%TEMP%\zat-tools），不依赖机器预装/系统 PATH
+    path.join(os.tmpdir(), 'zat-tools', 'pnpm.cjs'),
+    path.join(os.tmpdir(), 'zat-tools', 'pnpm.exe'),
+    process.env.PNPM_MJS,
+    path.join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cjs'),
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    path.join(os.homedir(), 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+  ]
+  // 常见开发工具自带的 pnpm（runtime 缓存，与 findNodeExe 同一套递归探测，不硬编码个人路径）
+  const findUnderCache = (dir, depth) => {
+    if (depth > 5) return null
+    for (const sub of ['node_modules/pnpm/bin/pnpm.cjs', 'pnpm/pnpm.cjs', 'bin/pnpm.cjs']) {
+      const p = path.join(dir, sub)
+      if (fs.existsSync(p)) return p
+    }
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return null }
+    for (const ent of entries) {
+      if (!ent.isDirectory() || ent.name === 'node_modules' || ent.name.startsWith('.')) continue
+      const r = findUnderCache(path.join(dir, ent.name), depth + 1)
+      if (r) return r
+    }
+    return null
+  }
+  try {
+    const homeCache = path.join(os.homedir(), '.cache')
+    if (fs.existsSync(homeCache)) {
+      const cached = findUnderCache(homeCache, 0)
+      if (cached) candidates.push(cached)
+    }
+  } catch { /* 缓存目录不可读则跳过 */ }
+  for (const c of candidates) if (c && fs.existsSync(c)) return c
+  return ''
+}
+
+// 用 Node 原生 https/http 下载文件（不依赖外部 curl.exe，也绝不弹控制台窗口）。
+// 返回 { ok }；onProgress(description, message) 透出进度。自动跟随 3xx 重定向。
+function downloadFileNative(url, dest, onProgress, timeoutMs = 60000, redirects = 0) {
+  return new Promise(resolve => {
+    if (redirects > 5) return resolve({ ok: false, err: '重定向次数过多' })
+    const lib = String(url).startsWith('https:') ? require('node:https') : require('node:http')
+    const request = lib.get(url, { headers: { 'User-Agent': 'zat-launcher' } }, response => {
+      const status = response.statusCode || 0
+      if (status >= 300 && status < 400 && response.headers.location) {
+        response.resume()
+        const next = new URL(response.headers.location, url).toString()
+        return resolve(downloadFileNative(next, dest, onProgress, timeoutMs, redirects + 1))
+      }
+      if (status !== 200) { response.resume(); return resolve({ ok: false, err: `HTTP ${status}` }) }
+      const total = Number(response.headers['content-length'] || 0)
+      let received = 0
+      const tmp = `${dest}.part`
+      fs.rmSync(tmp, { force: true })
+      const out = fs.createWriteStream(tmp)
+      response.on('data', chunk => {
+        received += chunk.length
+        out.write(chunk)
+        if (total && onProgress) onProgress('依赖', `下载中 ${Math.round(received / total * 100)}%`)
+      })
+      response.on('end', () => {
+        out.end(() => {
+          try { fs.renameSync(tmp, dest); resolve({ ok: true }) } catch (err) { fs.rmSync(tmp, { force: true }); resolve({ ok: false, err: err.message }) }
+        })
+      })
+      response.on('error', err => { fs.rmSync(tmp, { force: true }); resolve({ ok: false, err: err.message }) })
+    })
+    request.setTimeout(timeoutMs, () => { request.destroy(); resolve({ ok: false, err: '下载超时' }) })
+    request.on('error', err => resolve({ ok: false, err: err.message }))
+  })
+}
+
+// 下载 tgz 并解压 package/bin 下的 CLI 入口（pnpm.cjs 或 npm-cli.js），返回入口路径。
+// 注意：npm-cli.js 依赖同包 ../lib/*，必须保留整个解压目录，不能单独拷出入口。
+async function downloadCliTgz(url, dir, version, onProgress) {
+  const tgz = path.join(dir, `cli-${version}.tgz`)
+  try {
+    const r = await downloadFileNative(url, tgz, onProgress)
+    if (!r.ok || !fs.existsSync(tgz) || fs.statSync(tgz).size < 1000) { fs.rmSync(tgz, { force: true }); return '' }
+    const extractDir = path.join(dir, `package-${version}`)
+    fs.rmSync(extractDir, { recursive: true, force: true })
+    fs.mkdirSync(extractDir, { recursive: true })
+    const tar = await run('tar.exe', ['-xzf', tgz, '-C', extractDir], dir, 120000)
+    if (!tar.ok) { fs.rmSync(extractDir, { recursive: true, force: true }); return '' }
+    const binDir = path.join(extractDir, 'package', 'bin')
+    const entry = fs.existsSync(path.join(binDir, 'pnpm.cjs'))
+      ? path.join(binDir, 'pnpm.cjs')
+      : fs.existsSync(path.join(binDir, 'npm-cli.js'))
+        ? path.join(binDir, 'npm-cli.js')
+        : ''
+    if (!entry) { fs.rmSync(extractDir, { recursive: true, force: true }); return '' }
+    // pnpm.cjs 是自包含单文件可拷出；npm-cli.js 依赖同包，保留整个 package-<version> 目录
+    if (entry.endsWith('pnpm.cjs')) {
+      fs.copyFileSync(entry, path.join(dir, 'pnpm.cjs'))
+      fs.rmSync(extractDir, { recursive: true, force: true })
+      fs.rmSync(tgz, { force: true })
+      return path.join(dir, 'pnpm.cjs')
+    }
+    fs.rmSync(tgz, { force: true })
+    return entry
+  } catch { return '' }
+}
+
+async function downloadPnpmTgz(url, dir, version, onProgress) {
+  const entry = await downloadCliTgz(url, dir, version, onProgress)
+  return !!(entry && entry.endsWith('pnpm.cjs'))
+}
+
+// 安装依赖（+可选构建）。默认只装依赖：DSH 可用 tsx 源码模式直接运行（node --import tsx/esm apps/cli/src/bin.ts），
+// 无需全量 tsc/tsdown/web 构建——这才是"下载即用"的快速路径（clone + install 仅数分钟）。
+async function installDependencies(dshDir, pnpmCjs, nodeExe, onProgress, execute = runWithProgress, { build = false } = {}) {
+  // 把 node 可执行目录注入 PATH：pnpm 的原生包 postinstall（node-pty/esbuild/koffi/lefthook）
+  // 会调用裸 `node`，若机器上 node 不在 PATH 则安装失败。任何环境都必须可装。
+  const nodeBinDir = nodeExe && nodeExe !== 'pnpm' ? path.dirname(nodeExe) : ''
+  const envForPnpm = nodeBinDir
+    ? { ...process.env, PATH: `${nodeBinDir};${process.env.PATH || ''}` }
+    : undefined
+  const runPnpm = (description, args, timeout) => {
+    const cmd = pnpmCjs === 'pnpm'
+      ? { file: 'pnpm', args }
+      : { file: nodeExe, args: [pnpmCjs, ...args] }
+    return execute(description, cmd.file, cmd.args, dshDir, onProgress, timeout, envForPnpm)
+  }
+  if (onProgress) onProgress('依赖', '开始安装依赖（可能较久，进度实时可见）…')
+  const registry = await pickRegistry(nodeExe)
+  if (onProgress) onProgress('依赖', `使用 npm registry：${registry}`)
+  const install = await runPnpm('依赖', ['install', '--registry', registry], 15 * 60 * 1000)
+  if (!install.ok) {
+    const detail = (install.err || install.out || '').trim().split(/\r?\n/).slice(-3).join(' | ')
+    return { ok: false, step: 'install', message: `依赖安装失败：${detail}` }
+  }
+  if (build) {
+    if (onProgress) onProgress('构建', '开始构建 DSH（build:lib + build:web，可能较久）…')
+    const buildResult = await runPnpm('构建', ['run', 'build'], 25 * 60 * 1000)
+    if (!buildResult.ok) {
+      const detail = (buildResult.err || buildResult.out || '').trim().split(/\r?\n/).slice(-3).join(' | ')
+      return { ok: false, step: 'build', message: `构建失败：${detail}` }
+    }
+    if (onProgress) onProgress('构建', '构建完成')
+  } else if (onProgress) {
+    onProgress('依赖', '依赖安装完成（跳过全量构建，将使用 tsx 源码模式运行）')
+  }
+  return { ok: true }
+}
+
+// 选择一个 3 秒内可达的 npm registry：官方优先，否则国内 npmmirror
+async function pickRegistry(nodeExe, execute = run) {
+  const probe = 'require("node:https").get(process.argv[1], r=>{r.resume();process.exit(0)}).on("error",()=>process.exit(1));setTimeout(()=>process.exit(2),3000)'
+  const bin = nodeExe || process.execPath
+  for (const url of ['https://registry.npmjs.org/', 'https://registry.npmmirror.com/']) {
+    const r = await execute(bin, ['-e', probe, url], null, 5000)
+    if (r.ok && r.code === 0) return url
+  }
+  return 'https://registry.npmmirror.com/'
+}
+
+// npm 包级工具自举：下载 npm-cli 到 toolsDir（npm registry 官方/国内镜像，3 秒超时切换）。
+// 用 11.x：npm 10.9.2 的 arborist 解析 @deepseek-ai/dsh 依赖树会崩溃（Link.matches null，npm 已知 bug）。
+async function ensureNpmCli({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
+  const version = '11.3.0'
+  const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+  // npm-cli.js 保留在解压目录内（依赖同包 lib），先探测已解压的（两种命名都认）
+  for (const sub of [`package-${version}`, 'package']) {
+    const candidate = path.join(dir, sub, 'package', 'bin', 'npm-cli.js')
+    if (fs.existsSync(candidate)) return candidate
+  }
+  fs.mkdirSync(dir, { recursive: true })
+  let lastUrl = ''
+  for (let i = 0; i < NPM_REGISTRIES.length; i++) {
+    const base = NPM_REGISTRIES[i].replace(/\/$/, '')
+    lastUrl = `${base}/npm/-/npm-${version}.tgz`
+    if (onProgress) onProgress('依赖', `下载 npm CLI（${i + 1}/${NPM_REGISTRIES.length}）…`)
+    const entry = await downloadCliTgz(lastUrl, dir, version, onProgress)
+    if (entry && entry.endsWith('npm-cli.js')) return entry
+  }
+  if (onProgress) onProgress('依赖', `npm CLI 自举失败：${lastUrl}`)
+  throw new Error('无法自举 npm CLI（registry 均不可用）')
+}
+
+// 确保 toolsDir 里有可执行的 npm.cmd（DSH build 脚本直接调 `npm run ...`）。
+// 本机往往没有全局 npm，这里用自举的 npm-cli.js 生成一个 npm.cmd 包装（幂等）。
+// 返回 npm.cmd 路径；失败返回 ''（调用方决定是否降级）。
+async function ensureNpmCommand({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
+  try {
+    const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+    const npmCmd = path.join(dir, 'npm.cmd')
+    if (fs.existsSync(npmCmd)) return npmCmd
+    const cli = await ensureNpmCli({ nodeExe, toolsDir: dir, onProgress, execute })
+    if (!cli || !fs.existsSync(cli)) return ''
+    const nodePath = String(nodeExe || 'node').replace(/"/g, '')
+    const cliPath = String(cli).replace(/"/g, '')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(npmCmd, `@echo off\r\n"${nodePath}" "${cliPath}" %*\r\n`, 'utf8')
+    return npmCmd
+  } catch { return '' }
+}
+
+// 更新/构建工具链自举（白板原则：任何机器双击即用，不依赖预装 Node/npm/pnpm/git）。
+// 返回 { pnpmExe, env }：pnpmExe 可直接执行；env.PATH 已注入 node、pnpm、npm、git 所在目录，
+// 保证 DSH build 脚本里的 `node`/`pnpm`/`npm` 命令和更新/插件安装的 `git` 命令都能找到。
+async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
+  const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+  fs.mkdirSync(dir, { recursive: true })
+  const extraDirs = []
+  // 1) node：传入或用自举缓存
+  let node = String(nodeExe || findCachedNode(dir) || '').trim()
+  if (!node) {
+    try {
+      const info = await ensureNodeExe({ nodeExe: '', toolsDir: dir, onProgress, execute })
+      if (info.ok) node = String(info.nodeExe || '')
+    } catch { node = '' }
+  }
+  if (node && node.toLowerCase() !== 'node') extraDirs.push(path.dirname(node))
+  const nodePath = node || 'node'
+  // 2) npm.cmd（DSH build 脚本直接调 npm）——必须排在 node 目录之前，
+  //    否则命中 node 发行版自带的旧 npm（10.x arborist 崩溃）。zat-tools 里的 npm.cmd 是 11.3.0。
+  const npmCmd = await ensureNpmCommand({ nodeExe: nodePath, toolsDir: dir, onProgress, execute })
+  const npmFirstDirs = []
+  if (npmCmd) npmFirstDirs.push(dir)
+  // 3) pnpm：系统 pnpm 优先，否则自举 cjs。绝不生成 .cmd 包装（Node 24 execFile(.cmd) EINVAL），
+  //    .cjs 由 executablePnpm 用 node 执行；env.PATH 加 node/pnpm 目录供 DSH build 的 pnpm 命令解析。
+  let pnpmExe = ''
+  try { pnpmExe = findPnpm() } catch { pnpmExe = '' }
+  if (!pnpmExe || !fs.existsSync(pnpmExe)) {
+    try { pnpmExe = await ensurePnpm({ nodeExe: nodePath, toolsDir: dir, onProgress, execute }) } catch { pnpmExe = '' }
+  }
+  if (pnpmExe) {
+    if (/\.exe$/i.test(pnpmExe)) {
+      extraDirs.push(path.dirname(pnpmExe))
+    } else if (/\.cjs$/i.test(pnpmExe)) {
+      // node 目录已在 extraDirs（上面 node 分支）；cjs 所在目录一并加入，便于 pnpm 相关工具解析
+      extraDirs.push(path.dirname(pnpmExe))
+    }
+  }
+  // 4) git：系统 git 优先，没有则自举 PortableGit 到 zat-tools\git（官方 GitHub → ghfast/gh-proxy 镜像）
+  const gitExe = await ensureGit({ toolsDir: dir, onProgress, execute })
+  if (gitExe) extraDirs.push(path.dirname(gitExe))
+  // npm 目录必须排最前（覆盖 node 发行版自带的旧 npm）；其后 node/pnpm/git/系统 PATH
+  const env = { ...process.env, PATH: [...npmFirstDirs, ...extraDirs, process.env.PATH || ''].filter(Boolean).join(';') }
+  return { pnpmExe: pnpmExe || '', env }
+}
+
+// 定位 git：系统 PATH/常见位置优先；都没有时自举 PortableGit 到 toolsDir/git（幂等，已装则跳过）。
+// 返回 git.exe 绝对路径；失败返回 ''（调用方用系统 'git' 兜底）。
+const GIT_MIRRORS = [
+  'https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
+  'https://ghfast.top/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
+  'https://gh-proxy.com/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
+]
+
+function findSystemGit() {
+  const candidates = []
+  try {
+    const which = require('node:child_process').execFileSync('where.exe', ['git'], { stdio: 'pipe', encoding: 'utf8', windowsHide: true })
+    for (const line of String(which || '').split(/\r?\n/)) {
+      const t = line.trim().toLowerCase()
+      if (t && (t.endsWith('git.exe') || t.endsWith('git.cmd'))) candidates.push(line.trim())
+    }
+  } catch { /* 无系统 git */ }
+  const common = [
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe'),
+    path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'cmd', 'git.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Git', 'cmd', 'git.exe'),
+  ]
+  for (const c of common) if (fs.existsSync(c)) candidates.push(c)
+  return candidates.find(c => fs.existsSync(c)) || ''
+}
+
+// 自举 PortableGit：下载 .7z.exe 自解压包并静默解压（-y -gm2 -o"<dir>"），然后清理自解压壳。
+async function ensureGit({ toolsDir, onProgress, execute = run }) {
+  try {
+    const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+    const gitDir = path.join(dir, 'git')
+    const gitExe = path.join(gitDir, 'cmd', 'git.exe')
+    if (fs.existsSync(gitExe)) return gitExe
+    const system = findSystemGit()
+    if (system) return system
+    fs.mkdirSync(dir, { recursive: true })
+    let lastErr = ''
+    for (let i = 0; i < GIT_MIRRORS.length; i++) {
+      const url = GIT_MIRRORS[i]
+      if (onProgress) onProgress('git', `下载 PortableGit（${i + 1}/${GIT_MIRRORS.length}：${url.slice(0, 60)}…）`)
+      const pkg = path.join(dir, `portable-git-${i}.7z.exe`)
+      const r = await downloadFileNative(url, pkg, onProgress)
+      if (!r.ok || !fs.existsSync(pkg) || fs.statSync(pkg).size < 1000000) { fs.rmSync(pkg, { force: true }); lastErr = `源 ${i + 1} 下载失败`; continue }
+      if (onProgress) onProgress('git', '解压 PortableGit（自解压，约 1-2 分钟）…')
+      const ex = await run(pkg, ['-y', '-gm2', `-o"${gitDir}"`], dir, 10 * 60 * 1000)
+      fs.rmSync(pkg, { force: true })
+      if (ex.ok && fs.existsSync(gitExe)) {
+        if (onProgress) onProgress('git', `PortableGit 就绪：${gitExe}`)
+        return gitExe
+      }
+      lastErr = `解压失败或缺少 cmd/git.exe（${(ex.err || '').slice(0, 120)}）`
+      fs.rmSync(gitDir, { recursive: true, force: true })
+    }
+    if (onProgress) onProgress('git', `PortableGit 自举失败：${lastErr || '未知错误'}`)
+    return ''
+  } catch { return '' }
+}
+
+// 确保有可用的 Node.js：给定探测结果为空时，自动下载 Windows 便携版（官方 → 国内镜像，多版本回退）。
+// 解决普遍性问题：普通用户机器可能没有 Node，DSH 启动/安装必须能自动获取运行时。
+// 返回 { ok, nodeExe, downloaded }；失败返回 { ok:false, message }。
+function findCachedNode(toolsDir) {
+  try {
+    if (!fs.existsSync(toolsDir)) return ''
+    for (const ent of fs.readdirSync(toolsDir, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue
+      const exe = path.join(toolsDir, ent.name, 'node.exe')
+      if (fs.existsSync(exe)) return exe
+    }
+  } catch { /* 目录不可读 */ }
+  return ''
+}
+async function ensureNodeExe({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
+  if (nodeExe) {
+    // 无论 node 来源（PATH/系统/缓存），都确保共享副本存在（%TEMP%\zat-tools\node.exe），
+    // 插件市场按 0.6.4 约定探测该位置，任何电脑上都要对得上。
+    try {
+      const sharedDir = path.join(os.tmpdir(), 'zat-tools')
+      fs.mkdirSync(sharedDir, { recursive: true })
+      const sharedNode = path.join(sharedDir, 'node.exe')
+      if (!fs.existsSync(sharedNode)) {
+        let src = nodeExe
+        if (nodeExe === 'node') {
+          try { src = require('node:child_process').execFileSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' }).trim() } catch { src = '' }
+        }
+        if (src && fs.existsSync(src)) {
+          try { fs.linkSync(src, sharedNode) } catch { fs.copyFileSync(src, sharedNode) }
+        }
+      }
+    } catch { /* 共享目录失败不影响主路径 */ }
+    return { ok: true, nodeExe }
+  }
+  fs.mkdirSync(toolsDir, { recursive: true })
+  const cached = findCachedNode(toolsDir)
+  if (cached) {
+    // 缓存命中也要同步共享副本（%TEMP%\zat-tools\node.exe）——系统清理 TEMP 后市场探测位会缺失
+    try {
+      const sharedDir = path.join(os.tmpdir(), 'zat-tools')
+      fs.mkdirSync(sharedDir, { recursive: true })
+      const sharedNode = path.join(sharedDir, 'node.exe')
+      if (!fs.existsSync(sharedNode)) {
+        try { fs.linkSync(cached, sharedNode) } catch { fs.copyFileSync(cached, sharedNode) }
+      }
+    } catch { /* 共享目录失败不影响主路径 */ }
+    return { ok: true, nodeExe: cached, downloaded: false }
+  }
+  const versions = ['v22.19.0', 'v24.4.0', 'v22.20.0'] // 全部满足 DSH engines: ^22.19.0 || >=24.0.0
+  const bases = ['https://nodejs.org/dist', 'https://npmmirror.com/mirrors/node']
+  let lastErr = ''
+  for (const version of versions) {
+    for (const base of bases) {
+      const folder = `node-${version}-win-x64`
+      const url = `${base}/${version}/${folder}.zip`
+      const zip = path.join(toolsDir, `${folder}.zip`)
+      if (onProgress) onProgress('Node', `下载 Node.js ${version}（${base.includes('npmmirror') ? '国内镜像' : '官方源'}）…`)
+      const dl = await downloadFileNative(url, zip, onProgress, 90000)
+      if (!dl.ok) { lastErr = String(dl.err || '下载失败'); continue }
+      const r = await execute('Node', 'powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -Path '${zip}' -DestinationPath '${toolsDir}' -Force`], toolsDir, onProgress, 120000)
+      try { fs.rmSync(zip, { force: true }) } catch { /* 忽略 */ }
+      const exe = path.join(toolsDir, folder, 'node.exe')
+      if (fs.existsSync(exe)) {
+        const ver = await execute('Node', exe, ['-v'], toolsDir, onProgress, 10000)
+        if (ver.ok) {
+          // 与插件市场共享：把 node.exe 同步到 %TEMP%\zat-tools（市场探测位），双方不重复下载。
+          // 硬链接优先（同盘省空间），失败退复制；已存在则跳过。
+          try {
+            const sharedDir = path.join(os.tmpdir(), 'zat-tools')
+            fs.mkdirSync(sharedDir, { recursive: true })
+            const sharedNode = path.join(sharedDir, 'node.exe')
+            if (!fs.existsSync(sharedNode)) {
+              try { fs.linkSync(exe, sharedNode) } catch { fs.copyFileSync(exe, sharedNode) }
+            }
+          } catch { /* 共享目录失败不影响主路径 */ }
+          return { ok: true, nodeExe: exe, downloaded: true }
+        }
+        lastErr = 'Node 校验失败'
+      }
+    }
+  }
+  return { ok: false, message: `未找到可用的 Node.js 且自动下载失败（${lastErr || '全部源不可达'}）。请安装 Node.js 后重试。` }
+}
+
+// 返回可直接执行的 pnpm：.cjs（自举形态）在 Windows 上不能直接 spawn，
+// 生成 pnpm.cmd 包装（node <cjs> %*）并返回包装路径；exe/cmd 原样返回。
+// pnpm 可执行形态 → { file, args }（执行器直接展开）。
+//  - .exe：直接执行
+//  - .cjs：用 node 执行（Node 24 无 shell 时 execFile(.cmd) 直接 EINVAL，
+//           .cjs 更不可能被 CreateProcess 直接跑，统一 node <cjs> 是唯一可靠形态）
+//  - .cmd（残留包装）：解析内容提取真实 pnpm.cjs 路径，仍用 node 执行；失败返回 null。
+// 返回 null 表示不可用（调用方自行回退/报错）。
+function executablePnpm(pnpmExe, nodeExe) {
+  if (!pnpmExe) return null
+  const p = String(pnpmExe)
+  if (/\.exe$/i.test(p)) return { file: p, args: [] }
+  if (/\.cjs$/i.test(p)) return fs.existsSync(p) ? { file: String(nodeExe || 'node'), args: [p] } : null
+  if (/\.cmd$/i.test(p)) {
+    // 兜底：从 .cmd 包装里解析真实 pnpm.cjs（内容形如 "@node" "@cjs" %*）
+    try {
+      const content = fs.readFileSync(p, 'utf8')
+      const m = content.match(/"([^"]+\.cjs)"/)
+      if (m && fs.existsSync(m[1])) return { file: String(nodeExe || 'node'), args: [m[1]] }
+    } catch { /* 解析失败返回 null */ }
+    return null
+  }
+  return fs.existsSync(p) ? { file: p, args: [] } : null
+}
+
+// ---------------------------------------------------------------------------
+// 隐藏控制台启动器（根修弹窗问题）
+// 背景：启动器是无控制台 GUI，直接 spawn 控制台程序（node/powershell/curl 等）时
+// Windows 会给每个子进程新建可见控制台窗口 → "干活就疯狂弹窗"。官方在终端里跑
+// dsh 不弹，是因为子进程继承了终端控制台。
+// 修法：用 CreateProcess + CREATE_NEW_CONSOLE + STARTF_USESHOWWINDOW + SW_HIDE
+// 启动目标进程，给它一个【隐藏】控制台；其子进程继承同一隐藏控制台，从此不再弹窗。
+// 与官方终端启动等效，DSH 代码一行不改；每次启动器启动时自动生效，更新覆盖也不怕。
+// ---------------------------------------------------------------------------
+const CONSOLE_HOST_DLL = () => path.join(os.tmpdir(), 'zat-tools', 'dsh-console-host.dll')
+
+const CONSOLE_HOST_CSHARP = [
+  'using System;',
+  'using System.Runtime.InteropServices;',
+  'public class ConsoleHostLauncher {',
+  '  [StructLayout(LayoutKind.Sequential)] public struct STARTUPINFO { public int cb; public string lpReserved; public string lpDesktop; public string lpTitle; public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError; }',
+  '  [StructLayout(LayoutKind.Sequential)] public struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }',
+  '  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcess(string app, string cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);',
+  '  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+  '  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);',
+  '  public static int Launch(string app, string args, string cwd, string pidFile) {',
+  '    STARTUPINFO si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO));',
+  '    si.dwFlags = 0x00000001 | 0x00000100; si.wShowWindow = 0;',
+  '    si.hStdInput = GetStdHandle(-10); si.hStdOutput = GetStdHandle(-11); si.hStdError = GetStdHandle(-12);',
+  '    PROCESS_INFORMATION pi;',
+  '    string cmd = (args != null && args.Length > 0) ? "\\\"" + app + "\\\" " + args : "\\\"" + app + "\\\"";',
+  '    // cwd 为空字符串会让 CreateProcess 报 ERROR_INVALID_NAME(-123)，必须传 null',
+  '    string lpCwd = string.IsNullOrEmpty(cwd) ? null : cwd;',
+  '    bool ok = CreateProcess(app, cmd, IntPtr.Zero, IntPtr.Zero, true, 0x00000010, IntPtr.Zero, lpCwd, ref si, out pi);',
+  '    if (!ok) return -Marshal.GetLastWin32Error();',
+  '    // pid 写文件（不写 stdout）：目标进程继承的 stdout 管道完全留给目标进程输出，避免竞争',
+  '    try { if (!string.IsNullOrEmpty(pidFile)) System.IO.File.WriteAllText(pidFile, pi.dwProcessId.ToString()); } catch { }',
+  '    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);',
+  '    return pi.dwProcessId;',
+  '  }',
+  '}',
+].join('\n')
+
+// 确保隐藏控制台启动器 DLL 已编译（缓存到 %TEMP%\zat-tools\dsh-console-host.dll）。
+// 缓存带源码哈希校验：C# 代码更新后自动重新编译，避免旧 DLL 不匹配导致静默退回普通 spawn。
+async function ensureConsoleHostDll(execute = run) {
+  const dll = CONSOLE_HOST_DLL()
+  const csFile = path.join(path.dirname(dll), 'dsh-console-host.cs')
+  try {
+    fs.mkdirSync(path.dirname(dll), { recursive: true })
+    fs.writeFileSync(csFile, CONSOLE_HOST_CSHARP, 'utf8')
+    // 源码哈希 → 校验文件；不一致则删 DLL 重新编译
+    const crypto = require('node:crypto')
+    const hash = crypto.createHash('sha1').update(CONSOLE_HOST_CSHARP).digest('hex').slice(0, 12)
+    const hashFile = dll + '.hash'
+    const cachedHash = fs.existsSync(hashFile) ? fs.readFileSync(hashFile, 'utf8').trim() : ''
+    if (fs.existsSync(dll) && cachedHash === hash) return dll
+    fs.rmSync(dll, { force: true })
+    const r = await execute('powershell.exe', ['-NoProfile', '-Command', `Add-Type -Path '${csFile}' -OutputAssembly '${dll}' -ErrorAction Stop`], undefined, 120000)
+    if (r.ok && fs.existsSync(dll)) {
+      fs.writeFileSync(hashFile, hash, 'utf8')
+      return dll
+    }
+  } catch { /* 编译失败走普通 spawn 兜底 */ }
+  return ''
+}
+
+/**
+ * 以隐藏控制台启动控制台程序（根修弹窗）。返回兼容 ChildProcess 的句柄：
+ * { pid, stdout, stderr, on(event, cb), once(event, cb), kill() }。
+ * 目标进程经 CreateProcess(CREATE_NEW_CONSOLE + SW_HIDE) 启动，拥有隐藏控制台，
+ * 其子进程继承同一隐藏控制台 → 不再弹窗；stdout/stderr 通过继承的管道句柄直达调用方。
+ * 失败时返回普通 spawn 结果（保底可用）。
+ */
+async function spawnWithHiddenConsole(program, args, options = {}) {
+  const { cwd, env, stdio = ['ignore', 'pipe', 'pipe'], detached = true } = options
+  const dll = await ensureConsoleHostDll()
+  if (dll) {
+    try {
+      // pid 经文件回传（不写 stdout）：目标进程继承的 stdout 管道完全留给目标进程，
+      // 避免 PowerShell 的 pid 行与目标进程输出竞争同一管道导致解析失败。
+      const pidFile = path.join(os.tmpdir(), `zat-console-pid-${process.pid}-${Date.now()}.txt`)
+      // env 注入：C# CreateProcess 的 lpEnvironment 是 IntPtr.Zero（继承 PS 环境），
+      // 调用方传入的 env（DSH_HOME/PNPM_MJS/工具链 PATH）必须显式设置进 PS 进程环境，
+      // 否则目标进程拿不到 → npm 形态终端（如用户手动接入的目录）会落回默认 ~/.dsh home（串 home 的根因）。
+      // 只注入与当前进程不同的变量（通常是 DSH_HOME/PNPM_MJS/PATH 少数几个）：
+      //  - 减少 PS 脚本长度，启动更快；
+      //  - 避开 process.env 里含单引号/换行等特殊字符的值把 PS 脚本写坏
+      //    （曾导致 Launch 从未执行 → 8 秒超时 → 退回普通 spawn → 弹黑色终端 + 启动慢）。
+      const envLines = []
+      if (env && typeof env === 'object') {
+        for (const [k, v] of Object.entries(env)) {
+          if (v === undefined || v === null) continue
+          if (process.env[k] === String(v)) continue // 与当前进程相同 → 目标进程继承 PS 环境即可
+          const safe = String(v).replace(/'/g, "''").replace(/[\r\n]+/g, ' ')
+          try { envLines.push(`$env:${k}='${safe}'`) } catch { /* 跳过非法键 */ }
+        }
+      }
+      const psScript = [
+        ...envLines,
+        `Add-Type -Path '${dll}'`,
+        `$r = [ConsoleHostLauncher]::Launch('${String(program).replace(/'/g, "''")}', '${String((args || []).join(' ')).replace(/'/g, "''")}', '${String(cwd || '').replace(/'/g, "''")}', '${pidFile.replace(/'/g, "''")}')`,
+        `if ($r -le 0) { Write-Error "Launch failed: $r"; exit 1 }`,
+      ].join('; ')
+      // PowerShell 自身也隐藏窗口；目标进程的 stdout/stderr 继承 PowerShell 的管道句柄直达这里
+      const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', psScript], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      const { PassThrough } = require('node:stream')
+      const outStream = new PassThrough()
+      const errStream = new PassThrough()
+      ps.stdout.on('data', chunk => outStream.write(chunk))
+      ps.stderr.on('data', chunk => errStream.write(chunk))
+      const pid = await new Promise(resolve => {
+        const readPid = () => {
+          try {
+            const raw = fs.readFileSync(pidFile, 'utf8').trim()
+            if (/^\d+$/.test(raw)) return Number(raw)
+          } catch { /* 文件未生成 */ }
+          return 0
+        }
+        const timer = setInterval(() => {
+          const p = readPid()
+          if (p > 0) { clearInterval(timer); resolve(p) }
+        }, 100)
+        ps.on('error', () => { clearInterval(timer); resolve(0) })
+        setTimeout(() => { clearInterval(timer); resolve(readPid()) }, 8000)
+      })
+      try { fs.rmSync(pidFile, { force: true }) } catch { /* 忽略 */ }
+      if (pid > 0) {
+        // 目标进程已独立运行（CreateProcess 不挂在 PowerShell 下），stdout/stderr 管道由目标持有，
+        // 管道 end = 目标退出（PowerShell 已退出、只剩目标持有写端）。
+        const handle = new EventEmitter()
+        handle.pid = pid
+        // exitCode: null = 进程存活（startTerminal 就绪判定与 supervisor degraded 判定都依赖它）
+        handle.exitCode = null
+        handle.stdout = outStream
+        handle.stderr = errStream
+        let exited = false
+        const finish = (code) => {
+          if (exited) return
+          exited = true
+          handle.exitCode = code == null ? 0 : code
+          outStream.end()
+          errStream.end()
+          handle.emit('exit', handle.exitCode, null)
+          handle.emit('close', handle.exitCode, null)
+        }
+        ps.stdout.on('end', () => finish(0))
+        ps.on('error', () => finish(1))
+        handle.kill = (sig) => {
+          try {
+            require('node:child_process').execFileSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true })
+            return true
+          } catch { return false }
+        }
+        return { ok: true, hiddenConsole: true, child: handle, pid }
+      }
+    } catch { /* 隐藏控制台启动失败，退回普通 spawn */ }
+  }
+  // 兜底：普通 spawn（至少能跑；弹窗问题只在极端环境出现）
+  const child = spawn(program, args, { cwd, env, windowsHide: true, stdio, detached })
+  return { ok: true, hiddenConsole: false, child, pid: child.pid }
+}
+
+// 安装 profile 的官方 bundle 依赖（dsh-base / dsh-web-app）到 profile/node_modules，
+// 保证 dsh-app-boot 的 resolveBundleDir 能解析全部 bundle（否则启动报 cannot resolve profile bundle）。
+// 优先 pnpm（store 命中快），回退自举 npm CLI；以包实装为准（pnpm 可能因构建脚本被忽略返回非 0）。
+async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress, execute = runWithProgress }) {
+  const check = () =>
+    fs.existsSync(path.join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-base')) &&
+    fs.existsSync(path.join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-web-app'))
+  if (check()) return { ok: true, skipped: true }
+  fs.mkdirSync(profileDir, { recursive: true })
+  const registry = await pickRegistry(nodeExe)
+  // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
+  const toolchainEnv = execute && execute.env || null
+  const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
+  // bundle 版本必须与 DSH 匹配：registry 上 @latest 指向旧版 0.0.1-rc.1，@next 才是当前 rc（与 @deepseek-ai/dsh 同版本线）
+  const spec = ['@deepseek-ai/dsh-base@next', '@deepseek-ai/dsh-web-app@next']
+  const pnpmExe = executablePnpm(findPnpm(), nodeExe)
+  if (pnpmExe) {
+    if (onProgress) onProgress('依赖', '用 pnpm 安装 profile 官方 bundle（dsh-base / dsh-web-app）…')
+    try { fs.writeFileSync(path.join(profileDir, '.npmrc'), 'dangerously-allow-all-builds=true\n', 'utf8') } catch { /* 忽略 */ }
+    // package-import-method=copy：与主包安装一致，终端完全独立拷贝，删除/更新互不影响
+    const r = await execute('依赖', pnpmExe, ['add', ...spec, '--dir', profileDir, '--registry', registry, '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
+    if (check()) return { ok: true }
+  }
+  const npmCli = await ensureNpmCli({ nodeExe, toolsDir, onProgress })
+  if (onProgress) onProgress('依赖', '用 npm 安装 profile 官方 bundle…')
+  await execute('依赖', nodeExe, [npmCli, 'install', ...spec, '--no-audit', '--no-fund', '--prefix', profileDir, '--registry', registry], undefined, onProgress, 10 * 60 * 1000, envForCli)
+  if (check()) return { ok: true }
+  return { ok: false, message: 'profile 官方 bundle 安装失败（dsh-base / dsh-web-app 未实装）' }
+}
+
+// 修补 DSH 的 subprocess-local 实现：child_process.spawn 加 windowsHide: true，
+// 否则引擎/DSH 每次执行 shell/curl/git 命令都会弹出控制台窗口（用户反复反馈的弹窗问题）。
+// 兼容多种布局，任何 DSH 版本都能打中：
+//  - pnpm 布局：node_modules/.pnpm/@deepseek-ai+dsh-subprocess_*/.../lib/index.js
+//  - 平铺布局：node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js
+//  - workspace 布局（官方新版源码树）：packages/*/*/subprocess-local/lib/index.js 等
+//  - 任意深度的 subprocess-local/lib/index.js（递归，覆盖未来布局变化）
+function patchDshSubprocessNoWindow(rootDir) {
+  const targets = []
+  const pnpmDir = path.join(rootDir, 'node_modules', '.pnpm')
+  try {
+    if (fs.existsSync(pnpmDir)) {
+      for (const ent of fs.readdirSync(pnpmDir, { withFileTypes: true })) {
+        if (!ent.isDirectory() || !ent.name.includes('dsh-subprocess')) continue
+        targets.push(path.join(pnpmDir, ent.name, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js'))
+      }
+    }
+  } catch { /* 目录不可读则跳过 */ }
+  targets.push(path.join(rootDir, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js'))
+  // workspace 布局：递归找所有 subprocess-local/lib/index.js（深度限制，避免扫 node_modules）
+  const walkForSubprocess = (dir, depth) => {
+    if (depth > 4) return
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const ent of entries) {
+      if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === 'dist') continue
+      const full = path.join(dir, ent.name)
+      if (ent.isDirectory()) {
+        if (ent.name === 'subprocess-local') {
+          const lib = path.join(full, 'lib', 'index.js')
+          if (fs.existsSync(lib)) targets.push(lib)
+        }
+        walkForSubprocess(full, depth + 1)
+      }
+    }
+  }
+  walkForSubprocess(rootDir, 0)
+  let patched = 0
+  const seen = new Set()
+  for (const t of targets) {
+    try {
+      if (!fs.existsSync(t) || seen.has(t)) continue
+      seen.add(t)
+      let c = fs.readFileSync(t, 'utf8')
+      if (c.includes('windowsHide')) continue // 已打过补丁
+      const old = '\t\tdetached: platform !== "win32"\n\t});'
+      const rep = '\t\tdetached: platform !== "win32",\n\t\twindowsHide: true\n\t});'
+      if (c.includes(old)) {
+        fs.writeFileSync(t, c.split(old).join(rep), 'utf8')
+        patched++
+      }
+    } catch { /* 单个文件失败不阻断 */ }
+  }
+  return patched
+}
+
+// ★ 主路径：一键安装 = 下载官方预构建包（npm registry 官方优先/国内回退，进度实时）。
+// 优先用机器上已装的 pnpm（store 缓存命中快）；没有 pnpm 才自举 npm CLI。
+// 装完 lib/bin.js 直接可运行，零编译。targetDir 为独立新环境根目录。
+async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress, execute = runWithProgress }) {
+  const dshDir = path.join(targetDir, 'node_modules', '@deepseek-ai', 'dsh')
+  if (fs.existsSync(path.join(dshDir, 'lib', 'bin.js'))) {
+    if (onProgress) onProgress('下载', `官方 DSH 已存在（${dshDir}），跳过下载`)
+    return { ok: true, dshDir, skipped: true }
+  }
+  fs.mkdirSync(targetDir, { recursive: true })
+  const registry = await pickRegistry(nodeExe)
+  // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
+  const toolchainEnv = execute && execute.env || null
+  const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
+  const spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
+  // 1) 优先 pnpm（已装则 store 缓存命中，秒级；.cjs 形态转 pnpm.cmd 包装再执行）
+  const pnpmExe = executablePnpm(findPnpm(), nodeExe)
+  if (pnpmExe) {
+    if (onProgress) onProgress('下载', `用 pnpm 从 ${registry} 安装 ${spec}…`)
+    // pnpm 11 需要通过 .npmrc 允许原生构建脚本（node-pty/esbuild/koffi），否则这些包被忽略。
+    try { fs.writeFileSync(path.join(targetDir, '.npmrc'), 'dangerously-allow-all-builds=true\n', 'utf8') } catch { /* 忽略 */ }
+    // ★ package-import-method=copy：pnpm 默认把 store 文件硬链接进 node_modules，
+    //   所有终端共享同一份原生模块（如 sharp）——3080 加载着它时，其它终端里同版本
+    //   的文件永远删不掉（0.6.29 删除残留根因，nlink=8 实测证实）。
+    //   copy 模式让每个终端完全独立拷贝：删除/更新互不影响，真正"终端 100% 独立"。
+    const r = await execute('下载', pnpmExe, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
+    // 以 bin.js 就位为准：pnpm 可能因原生构建脚本被忽略而返回非 0（ERR_PNPM_IGNORED_BUILDS），
+    // 但预构建包本体已安装成功。缺失的原生模块由 DSH 首次启动时按需处理。
+    if (fs.existsSync(path.join(dshDir, 'lib', 'bin.js'))) {
+      if (onProgress) onProgress('下载', '官方 DSH 下载完成（预构建，直接可用）')
+      return { ok: true, dshDir }
+    }
+    if (onProgress) onProgress('下载', 'pnpm 安装未成功，回退 npm…')
+  }
+  // 2) 回退 npm CLI（自举一次，后续复用）
+  const npmCli = await ensureNpmCli({ nodeExe, toolsDir, onProgress })
+  if (onProgress) onProgress('下载', `用 npm 从 ${registry} 安装 ${spec}…`)
+  const r = await execute('下载', nodeExe, [npmCli, 'install', spec, '--no-audit', '--no-fund', '--prefix', targetDir, '--registry', registry], undefined, onProgress, 10 * 60 * 1000, envForCli)
+  if (!r.ok) {
+    const detail = (r.err || r.out || '').trim().split(/\r?\n/).slice(-3).join(' | ')
+    return { ok: false, message: `官方包下载失败：${detail}` }
+  }
+  if (!fs.existsSync(path.join(dshDir, 'lib', 'bin.js'))) return { ok: false, message: '下载完成但缺少 dsh 可执行入口' }
+  if (onProgress) onProgress('下载', '官方 DSH 下载完成（预构建，直接可用）')
+  return { ok: true, dshDir }
+}
+
+// 更新 npm 包形态的 DSH：pnpm add @deepseek-ai/dsh@latest --dir <终端根>（复用主下载路径，store 命中快）。
+// targetDir = 终端根（含 node_modules/@deepseek-ai/dsh）。零编译，更新后等用户启动生效。
+async function updateNpmPackage({ nodeExe, targetDir, onProgress, execute = runWithProgress }) {
+  const dshDir = path.join(targetDir, 'node_modules', '@deepseek-ai', 'dsh')
+  if (!fs.existsSync(path.join(dshDir, 'package.json'))) return { ok: false, message: '该终端不是 npm 包形态的 DSH，无法用此方式更新' }
+  const registry = await pickRegistry(nodeExe)
+  const pnpmExe = executablePnpm(findPnpm(), nodeExe)
+  if (!pnpmExe) return { ok: false, message: '未找到 pnpm，无法更新 npm 包形态的 DSH' }
+  // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
+  const toolchainEnv = execute && execute.env || null
+  const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
+  const spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
+  if (onProgress) onProgress('更新', `用 pnpm 从 ${registry} 更新 ${spec}…`)
+  const r = await execute('更新', pnpmExe, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
+  if (!r.ok) {
+    const detail = (r.err || r.out || '').trim().split(/\r?\n/).slice(-3).join(' | ')
+    return { ok: false, message: `npm 包更新失败：${detail}` }
+  }
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(dshDir, 'package.json'), 'utf8')).version
+    return { ok: true, version: v }
+  } catch {
+    return { ok: false, message: '更新完成但无法读取新版本号' }
+  }
+}
+
+module.exports = {
+  run, runWithProgress, probeSource, reachableSource,
+  downloadDshTo, ensurePnpm, findPnpm, downloadPnpmTgz, installDependencies, pickRegistry,
+  ensureNpmCli, installOfficialPackage, updateNpmPackage, installProfileBundles,
+  ensureNodeExe, findCachedNode, patchDshSubprocessNoWindow, ensureNpmCommand, ensureUpdateToolchain,
+  findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole,
+  DSH_ORIGIN, DSH_NPM_PACKAGE, DSH_NPM_TAG, NPM_REGISTRIES, SOURCE_TIMEOUT_MS,
+}
