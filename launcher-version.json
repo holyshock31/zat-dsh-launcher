@@ -1,6 +1,5 @@
 {
   "version": "1.0.5",
   "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.5/ZAT-DSH-Launcher-Setup-1.0.5.exe",
-  "notes": "v1.0.5 更新链路全面加固：一键更新/全新安装永远跟随 npm 最新 rc（rc.7→rc.8 实测直跳成功）；更新后自动同步 profile 插件（dsh-base/dsh-web-app 具体版本，杜绝启动崩溃）；启动参数改为真实启动探测，兼容 npm 包与源码版；救援中心新增 bundle 错配检测。",
-  "notes": "v1.0.0 首个正式版：多终端 100% 独立、一键全新安装（位置自选）、隐藏控制台、实时会话日志、救援中心、自动更新、内置插件市场、安全删除。"
+  "notes": "v1.0.5 更新链路全面加固：一键更新/全新安装永远跟随 npm 最新 rc（rc.7→rc.8 实测直跳成功）；更新后自动同步 profile 插件（dsh-base/dsh-web-app 具体版本，杜绝启动崩溃）；启动参数改为真实启动探测，兼容 npm 包与源码版；救援中心新增 bundle 错配检测。"
 }
