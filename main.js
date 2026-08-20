@@ -1108,7 +1108,7 @@ async function startTerminal(terminalId, startOptions = {}) {
   // --no-open：DSH 的 web 命令启动时默认会自己打开默认浏览器（日志：opening the default browser），
   // 加上 launcher 的 autoOpen 就是两个网页。让 DSH 不开，由 launcher 统一控制（只开一个）。
   // 但 npm 预构建包（rc.7 等）的 web 命令不支持 --no-open，传了会 unknown option 启动即退
-  // （旧版事故：npm 预构建包不认 --no-open 导致启动失败）。启动前实际探测参数兼容性，不支持则省略。
+  // （0.6.21 用户：装好 D:\4 后启动失败 3 次）。启动前实际探测参数兼容性，不支持则省略。
   let noOpen = true
   try { noOpen = await cliProbe.cliNoOpenSupported(p.dshDir, findNodeExe()) } catch { noOpen = false }
   if (!noOpen) pushTerminalLog(terminalId, 'info', '当前 DSH 版本不支持 --no-open（已自动省略；浏览器由 DSH 或手动打开）')
@@ -1484,7 +1484,7 @@ async function connectDshDirectory(dshDirInput, sourceType = 'manual', options =
   const id = emptyTwin ? emptyTwin.id : `terminal-${crypto.randomUUID()}`
   // 外部接入（manual/attached/scanned/filesystem 都是接入已存在的 DSH）：
   //  - npm 包形态（node_modules/@deepseek-ai/dsh）：目录自身就是 DSH_HOME（profiles 在其下），
-  //    必须指向它自己，否则 Profile/引擎/会话检测会全部落空（npm 包形态终端的 home 即目录自身）。
+  //    必须指向它自己，否则 Profile/引擎/会话检测会全部落空（启动器自己一键装的 D:\2 就是这种）。
   //  - 源码形态：DSH_HOME 指向其真实 home（默认 ~/.dsh）。
   // launcher 独立 home 只用于自建终端。
   const inspectedMode = inspected.mode || 'source'
@@ -2025,21 +2025,14 @@ function registerIpc() {
 
   // 启动器自身更新检查：更新源在 config.json 的 updaterUrl 配置，支持多个候选 URL
   // （逗号/空格分隔，如 https://a.com/version.json https://mirror.b.com/version.json），
-  // 每个候选 3 秒超时，按顺序快速切换（直连 → CDN → 镜像），全部失败才提示检查失败。
-  // JSON 格式：{ version, url, notes }。未配置时默认使用 GitHub 仓库的 launcher-version.json
-  // （官方 raw → jsDelivr CDN → ghfast 镜像，任何网络环境都能取到）。
+  // 每个候选 3 秒超时，按顺序快速切换（直连 → 镜像），全部失败才提示检查失败。
+  // JSON 格式：{ version, url, notes }
   ipcMain.handle('launcher:update-check', async () => {
     try {
       const cfg = readJsonFile(configUserPath(), {})
       const raw = String(cfg.updaterUrl || '').trim()
-      let urls = raw.split(/[,，\s]+/).map(u => u.trim()).filter(Boolean)
-      if (!urls.length) {
-        urls = [
-          'https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
-          'https://cdn.jsdelivr.net/gh/mishibeikejie/zat-dsh-launcher@main/launcher-version.json',
-          'https://ghfast.top/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
-        ]
-      }
+      const urls = raw.split(/[,，\s]+/).map(u => u.trim()).filter(Boolean)
+      if (!urls.length) return { ok: false, notConfigured: true, version: APP_VERSION, message: '未配置启动器更新源' }
       let data = null
       for (const url of urls) {
         const controller = new AbortController()
@@ -2137,7 +2130,7 @@ function registerIpc() {
 
   // 点加号 → 让用户选/新建一个文件夹作为新终端环境目录。
   // 若所选目录里已经装有 DSH（源码形态或 npm 包形态），直接接入为已有终端，
-  // 而不是登记成空终端——否则用户选已装目录会得到"里面没有终端"。
+  // 而不是登记成空终端——否则用户选 D:\2 这种已装目录会得到"里面没有终端"。
   ipcMain.handle('terminals:create-empty', async () => {
     if (!terminalRegistry || !terminalSupervisor) return { ok: false, message: '终端系统未就绪' }
     let dir = ''

@@ -196,7 +196,7 @@ function firstFreePortAvoiding(registeredPorts = [], reservedPorts = [], isPortF
 
 // 扫描本机 DSH：运行实例（优先）+ 常见位置 + 显式目录，结果去重。
 // 常见位置 = 用户主目录一级 + 每个磁盘根目录一级，逐个做「内容识别」（inspectDshDir）。
-// 目录名不重要（源码形态惯例叫 deepseek-harness，npm 包形态可能叫任何名字（按内容识别，不看名字）），
+// 目录名不重要（源码形态惯例叫 deepseek-harness，npm 包形态可能叫任何名字，如 D:\2），
 // 只要里面是 DSH 程序就算。运行时枚举盘符，不含任何个人路径字面量，白板/隐私不受影响。
 // options.processEntries 可注入（[{pid,commandLine}]）。
 async function scanDshInstallations(options = {}) {
@@ -218,7 +218,7 @@ async function scanDshInstallations(options = {}) {
     const home = os.homedir()
     // 用户主目录一级：任意名字的目录都可能装着 DSH（npm 包形态常见）
     if (scanDrives) for (const dir of collectLevel1Dirs(home)) common.push(dir)
-    // 每个磁盘根目录一级：任意名字，内容识别后自动过滤非 DSH
+    // 每个磁盘根目录一级：任意名字（如 D:\2），内容识别后自动过滤非 DSH
     if (scanDrives) {
       for (let code = 65; code <= 90; code++) {
         const root = `${String.fromCharCode(code)}:\\`

@@ -251,9 +251,17 @@ function renderEmptyState(terminal) {
   if (tabs) tabs.style.display = ''
   if (actionPanel) actionPanel.style.display = ''
   if (isEmpty) {
-    // 空终端只替换内容区域，保持页面骨架；控制台/环境/救援内容不与空状态重叠。
-    document.querySelectorAll('.panel[data-panel="console"], .panel[data-panel="env"], .panel[data-panel="rescue"]').forEach(p => p.classList.remove('active'))
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'console'))
+    // 空终端：尊重用户当前点击的 tab（1.0.0 修复——之前空状态点环境/救援被
+    // switchTab 直接吞掉，表现为"点了没反应"）；默认仍展示 empty 引导面板。
+    const activeTab = document.querySelector('.tab.active')?.dataset.tab || ''
+    if (activeTab === 'console' || activeTab === 'env' || activeTab === 'rescue') {
+      document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === activeTab))
+      emptyPanel.classList.remove('active')
+    } else {
+      emptyPanel.classList.add('active')
+      document.querySelectorAll('.panel[data-panel="console"], .panel[data-panel="env"], .panel[data-panel="rescue"]').forEach(p => p.classList.remove('active'))
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'console'))
+    }
   } else {
     const activeTab = document.querySelector('.tab.active')?.dataset.tab || 'console'
     switchTab(activeTab)
@@ -597,9 +605,8 @@ function renderRescueDiagnosis(result) {
 function confirm(title, message) { return new Promise((resolve) => { modalResolve = resolve; els.modalTitle.textContent = title; els.modalMessage.textContent = message; els.modal.hidden = false }) }
 function closeModal(result) { els.modal.hidden = true; if (modalResolve) { const r = modalResolve; modalResolve = null; r(result) } }
 function switchTab(name) {
-  const current = state.terminals.find(item => item.id === state.selectedTerminalId)
-  const isEmpty = !current || !current.dshDir || current.sourceType === 'fresh-empty' || current.sourceType === 'fresh-installed-empty'
-  if (isEmpty && name !== 'empty') return
+  // 1.0.0 修复：移除空状态拦截——空终端时点环境/救援 tab 也要能切换，
+  // 否则"点了没反应"（0.6.30 同样存在，只是当时有终端未触发）。
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name))
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === name))
   const a = document.querySelector(`.tab[data-tab="${name}"]`)

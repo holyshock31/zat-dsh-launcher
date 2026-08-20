@@ -637,7 +637,7 @@ async function spawnWithHiddenConsole(program, args, options = {}) {
       const pidFile = path.join(os.tmpdir(), `zat-console-pid-${process.pid}-${Date.now()}.txt`)
       // env 注入：C# CreateProcess 的 lpEnvironment 是 IntPtr.Zero（继承 PS 环境），
       // 调用方传入的 env（DSH_HOME/PNPM_MJS/工具链 PATH）必须显式设置进 PS 进程环境，
-      // 否则目标进程拿不到 → npm 形态终端（如用户手动接入的目录）会落回默认 ~/.dsh home（串 home 的根因）。
+      // 否则目标进程拿不到 → D:\2 这类 npm 形态终端会落回默认 ~/.dsh home（串 home 的根因）。
       // 只注入与当前进程不同的变量（通常是 DSH_HOME/PNPM_MJS/PATH 少数几个）：
       //  - 减少 PS 脚本长度，启动更快；
       //  - 避开 process.env 里含单引号/换行等特殊字符的值把 PS 脚本写坏
