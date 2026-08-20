@@ -251,11 +251,11 @@ function renderEmptyState(terminal) {
   if (tabs) tabs.style.display = ''
   if (actionPanel) actionPanel.style.display = ''
   if (isEmpty) {
-    // 空终端：尊重用户当前点击的 tab（1.0.0 修复——之前空状态点环境/救援被
-    // switchTab 直接吞掉，表现为"点了没反应"）；默认仍展示 empty 引导面板。
-    const activeTab = document.querySelector('.tab.active')?.dataset.tab || ''
-    if (activeTab === 'console' || activeTab === 'env' || activeTab === 'rescue') {
-      document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === activeTab))
+    // 空终端（白板）：默认展示 empty 引导面板（"一键安装/扫描/手动"）。
+    // 用户主动点击过 环境/救援 tab 才切到对应面板（修复 1.0.0 的"点了没反应"）；
+    // 点回 console tab 或未点击过时恢复引导。
+    if (emptyTabOverride === 'env' || emptyTabOverride === 'rescue') {
+      document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === emptyTabOverride))
       emptyPanel.classList.remove('active')
     } else {
       emptyPanel.classList.add('active')
@@ -604,11 +604,26 @@ function renderRescueDiagnosis(result) {
 }
 function confirm(title, message) { return new Promise((resolve) => { modalResolve = resolve; els.modalTitle.textContent = title; els.modalMessage.textContent = message; els.modal.hidden = false }) }
 function closeModal(result) { els.modal.hidden = true; if (modalResolve) { const r = modalResolve; modalResolve = null; r(result) } }
+// 空状态（白板）下用户主动点击的 tab：记录后 renderEmptyState 保持对应面板，
+// 默认（未点击 / 点回 console）显示 empty 引导。修复"点不动"的同时保证打开是白板引导页。
+let emptyTabOverride = ''
 function switchTab(name) {
   // 1.0.0 修复：移除空状态拦截——空终端时点环境/救援 tab 也要能切换，
   // 否则"点了没反应"（0.6.30 同样存在，只是当时有终端未触发）。
+  emptyTabOverride = name
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name))
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.dataset.panel === name))
+  // 空状态（白板）下"控制台"没有可看内容，点它回到白板引导（否则用户找不到安装入口）
+  if (name === 'console') {
+    const current = state.terminals.find(item => item.id === state.selectedTerminalId)
+    const isEmpty = !current || !current.dshDir || current.sourceType === 'fresh-empty' || current.sourceType === 'fresh-installed-empty'
+    if (isEmpty) {
+      const emptyPanel = document.querySelector('.panel[data-panel="empty"]')
+      const consolePanel = document.querySelector('.panel[data-panel="console"]')
+      if (emptyPanel) emptyPanel.classList.add('active')
+      if (consolePanel) consolePanel.classList.remove('active')
+    }
+  }
   const a = document.querySelector(`.tab[data-tab="${name}"]`)
   if (a) { els.indicator.style.width = `${a.offsetWidth}px`; els.indicator.style.transform = `translateX(${a.offsetLeft}px)` }
 }
