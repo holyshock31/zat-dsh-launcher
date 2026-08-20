@@ -54,7 +54,11 @@ async function cliNoOpenSupported(dshDir, nodeExe, opts = {}) {
     if (!cli) { ok = false }
     else {
       const execNode = String(nodeExe || 'node')
-      const execArgs = built ? [cli, 'web', '--help'] : ['--import', 'tsx/esm', cli, 'web', '--help']
+      // 真实启动形态探测：--help 的选项列表不可靠（rc.7/rc.8 的 npm 包在 --help 时
+      // 透传容忍、真实启动却报 "unknown option '--no-open'"）。改为带随机端口真实启动，
+      // 3 秒内 stderr 出现 unknown option 即判不支持；否则视为支持（失败有启动自适应兜底）。
+      const probePort = 50000 + Math.floor(Math.random() * 10000)
+      const execArgs = built ? [cli, 'web', '--no-open', '--port', String(probePort)] : ['--import', 'tsx/esm', cli, 'web', '--no-open', '--port', String(probePort)]
       const r = await new Promise(resolve => {
         let child
         try {
@@ -73,8 +77,8 @@ async function cliNoOpenSupported(dshDir, nodeExe, opts = {}) {
         child.on('error', () => { clearTimeout(timer); resolve({ code: -1, out }) })
         child.on('exit', code => { clearTimeout(timer); resolve({ code, out }) })
       })
-      // 支持 = help 正常打印(exit 0)且选项列表里有 --no-open、没有 unknown option 报错
-      ok = r.code === 0 && /--no-open/.test(r.out) && !/unknown option ['"]--no-open['"]/i.test(r.out)
+      // 真实启动报 unknown option '--no-open' → 不支持；其他情况（启动成功/超时/其它错误）→ 支持
+      ok = !/unknown option ['"]--no-open['"]/i.test(r.out)
     }
   } catch { ok = false }
   cache.set(key, { ok, at: Date.now() })

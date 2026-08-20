@@ -129,6 +129,17 @@ function diagnoseCrash(logLines) {
     }
     m = text.match(/Cannot find package ['"]([^'"]+)['"]/i)
     if (m) { add('missing-module', m[1], `缺少依赖包「${m[1]}」`, 'exclude-bundle'); continue }
+    // profile 插件与 DSH 版本不匹配：更新主包后 profile bundle 未同步，
+    // rc.8 加载旧 bundle 时报 "Unknown file extension .css / ERR_UNKNOWN_FILE_EXTENSION"。
+    m = text.match(/Unknown file extension ["']?\.([a-z0-9]+)["']?/i) || text.match(/ERR_UNKNOWN_FILE_EXTENSION/i)
+    if (m) {
+      add('bundle-mismatch', '', `profile 插件与 DSH 版本不匹配（加载 .${m[1] || '资源'} 失败）：更新 DSH 后 profile 依赖未同步，请重新安装 profile 依赖后重启`, 'restart')
+      continue
+    }
+    if (/failed to import loader entry/i.test(text)) {
+      add('bundle-mismatch', '', 'profile 插件加载失败（版本不匹配）：更新 DSH 后 profile 依赖未同步，请重新安装 profile 依赖后重启', 'restart')
+      continue
+    }
     // CLI 参数不兼容：如 npm 预构建包 rc.7 不认 --no-open → "unknown option '--no-open'"
     // 启动器 0.6.22 起启动前自动探测参数兼容性，遇到此错误直接重试启动即可。
     m = text.match(/unknown option ['"]([^'"]+)['"]/i)

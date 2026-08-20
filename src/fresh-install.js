@@ -726,18 +726,28 @@ async function spawnWithHiddenConsole(program, args, options = {}) {
 // 安装 profile 的官方 bundle 依赖（dsh-base / dsh-web-app）到 profile/node_modules，
 // 保证 dsh-app-boot 的 resolveBundleDir 能解析全部 bundle（否则启动报 cannot resolve profile bundle）。
 // 优先 pnpm（store 命中快），回退自举 npm CLI；以包实装为准（pnpm 可能因构建脚本被忽略返回非 0）。
-async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress, execute = runWithProgress }) {
+// force=true：忽略"已存在跳过"，强制重装到 @next（DSH 主包更新后必须同步，
+// 否则 rc 错配导致启动崩溃：Unknown file extension .css / ERR_UNKNOWN_FILE_EXTENSION）。
+async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress, execute = runWithProgress, force = false }) {
   const check = () =>
     fs.existsSync(path.join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-base')) &&
     fs.existsSync(path.join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-web-app'))
-  if (check()) return { ok: true, skipped: true }
+  if (check() && !force) return { ok: true, skipped: true }
   fs.mkdirSync(profileDir, { recursive: true })
   const registry = await pickRegistry(nodeExe)
   // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
   const toolchainEnv = execute && execute.env || null
   const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
-  // bundle 版本必须与 DSH 匹配：registry 上 @latest 指向旧版 0.0.1-rc.1，@next 才是当前 rc（与 @deepseek-ai/dsh 同版本线）
-  const spec = ['@deepseek-ai/dsh-base@next', '@deepseek-ai/dsh-web-app@next']
+  // bundle 版本必须与 DSH 匹配：registry 上 @latest 指向旧版 0.0.1-rc.1，@next 才是当前 rc（与 @deepseek-ai/dsh 同版本线）。
+  // 但 pnpm 的 @next 标签在"已装过"目录解析不可靠（实测 add @next 仍装出旧 rc.7），
+  // 必须用 dist-tags 动态解析出的具体版本号（rc.7→rc.8 更新实测 3.9s 成功）；
+  // 解析失败才回退 @next 标签。
+  const baseV = await resolvePackageVersion(nodeExe, '@deepseek-ai/dsh-base')
+  const webV = await resolvePackageVersion(nodeExe, '@deepseek-ai/dsh-web-app')
+  const spec = [
+    baseV ? `@deepseek-ai/dsh-base@${baseV}` : '@deepseek-ai/dsh-base@next',
+    webV ? `@deepseek-ai/dsh-web-app@${webV}` : '@deepseek-ai/dsh-web-app@next',
+  ]
   const pnpmExe = executablePnpm(findPnpm(), nodeExe)
   if (pnpmExe) {
     if (onProgress) onProgress('依赖', '用 pnpm 安装 profile 官方 bundle（dsh-base / dsh-web-app）…')
@@ -839,6 +849,34 @@ async function resolveLatestDshVersion(nodeExe, timeoutMs = 3000) {
   return ''
 }
 
+// 解析任意 @deepseek-ai 包的 dist-tags 最新版本（installProfileBundles 用，
+// pnpm 的 @next 标签在"已装过"目录解析不可靠，必须用具体版本号）
+async function resolvePackageVersion(nodeExe, pkgName, timeoutMs = 3000) {
+  const script = 'fetch(process.argv[1]).then(r=>r.json()).then(j=>{console.log((j.latest||"")+" "+(j.next||""))}).catch(()=>process.exit(1))'
+  const verCmp = (a, b) => {
+    const pa = String(a).split(/[.\-]/).map(x => parseInt(x, 10) || 0)
+    const pb = String(b).split(/[.\-]/).map(x => parseInt(x, 10) || 0)
+    const len = Math.max(pa.length, pb.length)
+    for (let i = 0; i < len; i++) {
+      const x = pa[i] || 0
+      const y = pb[i] || 0
+      if (x !== y) return x - y
+    }
+    return 0
+  }
+  for (const base of NPM_REGISTRIES) {
+    const url = `${String(base).replace(/\/$/, '')}/-/package/${pkgName}/dist-tags`
+    const r = await run(nodeExe, ['-e', script, url], null, timeoutMs)
+    if (!r.ok) continue
+    const parts = r.out.trim().split(/\s+/).filter(Boolean)
+    const latest = parts[0] || ''
+    const next = parts[1] || ''
+    if (latest && next) return verCmp(next, latest) > 0 ? next : latest
+    if (latest || next) return latest || next
+  }
+  return ''
+}
+
 // ★ 主路径：一键安装 = 下载官方预构建包（npm registry 官方优先/国内回退，进度实时）。
 // 优先用机器上已装的 pnpm（store 缓存命中快）；没有 pnpm 才自举 npm CLI。
 // 装完 lib/bin.js 直接可运行，零编译。targetDir 为独立新环境根目录。
@@ -909,10 +947,18 @@ async function updateNpmPackage({ nodeExe, targetDir, onProgress, execute = runW
     if (v) spec = `${DSH_NPM_PACKAGE}@${v}`
   } catch { /* 回退标签 */ }
   if (onProgress) onProgress('更新', `用 pnpm 从 ${registry} 更新 ${spec}…`)
-  const r = await execute('更新', pnpmExe, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
+  // pnpm 11 默认忽略依赖构建脚本并返回非 0（ERR_PNPM_IGNORED_BUILDS）——
+  // 必须显式允许，否则原生模块（如 subprocess-local）缺失且更新被误判失败。
+  // 宽容兜底：即使返回非 0，只要目标版本已就位就算成功（ignored-builds 场景包已装上）。
+  const r = await execute('更新', pnpmExe, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.package-import-method=copy', '--config.dangerously-allow-all-builds=true'], undefined, onProgress, 10 * 60 * 1000, envForCli)
   if (!r.ok) {
     const detail = (r.err || r.out || '').trim().split(/\r?\n/).slice(-3).join(' | ')
-    return { ok: false, message: `npm 包更新失败：${detail}` }
+    // 已就位判定：目标版本出现在输出里（pnpm 会打印 "+ @deepseek-ai/dsh <version>"）
+    const targetVersion = String(spec.split('@').pop() || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const versionSeated = targetVersion ? new RegExp(targetVersion).test(r.out) : false
+    if (!versionSeated || !/ERR_PNPM_IGNORED_BUILDS/.test(String(r.err || '') + String(r.out || ''))) {
+      return { ok: false, message: `npm 包更新失败：${detail}` }
+    }
   }
   try {
     const v = JSON.parse(fs.readFileSync(path.join(dshDir, 'package.json'), 'utf8')).version

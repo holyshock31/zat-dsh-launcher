@@ -25,7 +25,7 @@ const { planTerminalDeletion } = require('./src/terminal-files')
 const toolchainExec = require('./src/toolchain-execute')
 const cliProbe = require('./src/cli-probe')
 
-const APP_VERSION = '1.0.4'
+const APP_VERSION = '1.0.5'
 
 // ---------------------------------------------------------------------------
 // 白板/交付版隔离：打包版使用按版本隔离的数据目录（%APPDATA%\ZAT-Launcher\v<版本>），
@@ -2013,11 +2013,27 @@ function registerIpc() {
     const result = await installHarnessUpdate(p.dshDir, snapshotDir, updateExecute, {
       pnpmExe,
       probeLatest: harnessUpdate.npmLatestProbe(findNodeExe()),
-      npmUpdater: async () => freshInstall.updateNpmPackage({
-        nodeExe: findNodeExe(),
-        targetDir: p.home,
-        onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
-      }),
+      npmUpdater: async () => {
+        // 更新主包（npm 包形态），成功后再强制同步 profile bundle 到 @next：
+        // 主包升级后 bundle 不跟上的话，rc 错配导致启动崩溃（Unknown file extension .css）。
+        const up = await freshInstall.updateNpmPackage({
+          nodeExe: findNodeExe(),
+          targetDir: p.home,
+          onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
+        })
+        if (!up.ok) return up
+        pushTerminalLog(id, 'info', '主包已更新，正在同步 profile 插件（dsh-base / dsh-web-app）…')
+        const bundles = await freshInstall.installProfileBundles({
+          nodeExe: findNodeExe(),
+          profileDir: p.profileDir,
+          toolsDir: path.join(p.home, '.tools'),
+          onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
+          execute: updateExecute,
+          force: true,
+        })
+        if (!bundles.ok) return { ok: false, message: `主包已更新，但 profile 插件同步失败：${bundles.message}` }
+        return { ...up, message: `${up.message}；profile 插件已同步` }
+      },
     })
     pushTerminalLog(id, result.ok ? 'info' : 'error', result.message)
     return result
