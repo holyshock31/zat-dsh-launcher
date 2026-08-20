@@ -13,7 +13,11 @@ const { updateSources } = require('./harness-update')
 
 const DSH_ORIGIN = 'https://github.com/deepseek-ai/deepseek-harness.git'
 const DSH_NPM_PACKAGE = '@deepseek-ai/dsh'
-const DSH_NPM_TAG = 'latest'
+// 不固定标签：npm 上 latest 可能落后（如 latest=rc.7 而 next=rc.8），
+// 且 pnpm add @next 的标签解析不可靠（实测 add @next 装出旧 rc.7）。
+// 安装/更新统一走 resolveLatestDshVersion：动态查 dist-tags 取最新版本号，
+// 用具体版本号安装（@deepseek-ai/dsh@0.1.0-rc.8），未来新 rc 自动跟随。
+const DSH_NPM_TAG = 'next'
 const NPM_REGISTRIES = [
   'https://registry.npmjs.org/',
   'https://registry.npmmirror.com/',
@@ -805,6 +809,36 @@ function patchDshSubprocessNoWindow(rootDir) {
   return patched
 }
 
+// 动态解析 npm 上 @deepseek-ai/dsh 的最新版本号（dist-tags 中 latest 与 next 比较取新）。
+// 用具体版本号安装/更新——pnpm 的 @next 标签解析不可靠（实测 add @next 装出旧 rc.7），
+// 而 dist-tags 始终准确（实测 latest=0.1.0-rc.7, next=0.1.0-rc.8 → 返回 rc.8）。
+// 返回版本号字符串（如 '0.1.0-rc.8'）；全部源不可达返回 ''（调用方回退标签）。
+async function resolveLatestDshVersion(nodeExe, timeoutMs = 3000) {
+  const script = 'fetch(process.argv[1]).then(r=>r.json()).then(j=>{console.log((j.latest||"")+" "+(j.next||""))}).catch(()=>process.exit(1))'
+  const verCmp = (a, b) => {
+    const pa = String(a).split(/[.\-]/).map(x => parseInt(x, 10) || 0)
+    const pb = String(b).split(/[.\-]/).map(x => parseInt(x, 10) || 0)
+    const len = Math.max(pa.length, pb.length)
+    for (let i = 0; i < len; i++) {
+      const x = pa[i] || 0
+      const y = pb[i] || 0
+      if (x !== y) return x - y
+    }
+    return 0
+  }
+  for (const base of NPM_REGISTRIES) {
+    const url = `${String(base).replace(/\/$/, '')}/-/package/${DSH_NPM_PACKAGE}/dist-tags`
+    const r = await run(nodeExe, ['-e', script, url], null, timeoutMs)
+    if (!r.ok) continue
+    const parts = r.out.trim().split(/\s+/).filter(Boolean)
+    const latest = parts[0] || ''
+    const next = parts[1] || ''
+    if (latest && next) return verCmp(next, latest) > 0 ? next : latest
+    if (latest || next) return latest || next
+  }
+  return ''
+}
+
 // ★ 主路径：一键安装 = 下载官方预构建包（npm registry 官方优先/国内回退，进度实时）。
 // 优先用机器上已装的 pnpm（store 缓存命中快）；没有 pnpm 才自举 npm CLI。
 // 装完 lib/bin.js 直接可运行，零编译。targetDir 为独立新环境根目录。
@@ -819,7 +853,12 @@ async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress
   // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
   const toolchainEnv = execute && execute.env || null
   const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
-  const spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
+  // 动态解析最新版本号（latest/next 取新），解析失败回退标签
+  let spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
+  try {
+    const v = await resolveLatestDshVersion(nodeExe)
+    if (v) spec = `${DSH_NPM_PACKAGE}@${v}`
+  } catch { /* 回退标签 */ }
   // 1) 优先 pnpm（已装则 store 缓存命中，秒级；.cjs 形态转 pnpm.cmd 包装再执行）
   const pnpmExe = executablePnpm(findPnpm(), nodeExe)
   if (pnpmExe) {
@@ -863,7 +902,12 @@ async function updateNpmPackage({ nodeExe, targetDir, onProgress, execute = runW
   // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
   const toolchainEnv = execute && execute.env || null
   const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
-  const spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
+  // 动态解析最新版本号（latest/next 取新），解析失败回退标签
+  let spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
+  try {
+    const v = await resolveLatestDshVersion(nodeExe)
+    if (v) spec = `${DSH_NPM_PACKAGE}@${v}`
+  } catch { /* 回退标签 */ }
   if (onProgress) onProgress('更新', `用 pnpm 从 ${registry} 更新 ${spec}…`)
   const r = await execute('更新', pnpmExe, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
   if (!r.ok) {
@@ -884,5 +928,6 @@ module.exports = {
   ensureNpmCli, installOfficialPackage, updateNpmPackage, installProfileBundles,
   ensureNodeExe, findCachedNode, patchDshSubprocessNoWindow, ensureNpmCommand, ensureUpdateToolchain,
   findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole,
+  resolveLatestDshVersion,
   DSH_ORIGIN, DSH_NPM_PACKAGE, DSH_NPM_TAG, NPM_REGISTRIES, SOURCE_TIMEOUT_MS,
 }

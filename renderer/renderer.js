@@ -440,7 +440,7 @@ let launcherAutoChecked = false
 function renderLauncherUpdate(info) {
   if (!els.launcherVersion || !els.launcherUpdateDetail) return
   const v = info || {}
-  els.launcherVersion.textContent = `v${v.version || '1.0.3'}`
+  els.launcherVersion.textContent = `v${v.version || '1.0.4'}`
   if (!els.launcherUpdateBadge) return
   els.launcherUpdateBadge.hidden = false
   if (v.updateAvailable) {
@@ -981,7 +981,7 @@ async function init() {
     els.launcherCheckUpdate.disabled = true
     els.launcherCheckUpdate.textContent = '检查中…'
     try {
-      const timeout = new Promise(resolve => setTimeout(() => resolve({ ok: false, checkFailed: true, version: '1.0.3' }), 12000))
+      const timeout = new Promise(resolve => setTimeout(() => resolve({ ok: false, checkFailed: true, version: '1.0.4' }), 12000))
       const result = await Promise.race([api.launcherCheckUpdate(), timeout])
       renderLauncherUpdate(result)
       if (result.updateAvailable && result.url) {
@@ -1026,7 +1026,7 @@ async function loadState() {
   state.settings = s.settings
   if (els.autoRestart) els.autoRestart.checked = !!s.settings.autoRestart
   if (els.autoOpen) els.autoOpen.checked = !!s.settings.autoOpen
-  if (els.version) els.version.textContent = `v${s.version || '1.0.3'}`
+  if (els.version) els.version.textContent = `v${s.version || '1.0.4'}`
   const tid = state.selectedTerminalId
   if (api.harnessInfo && tid) { const v = await api.harnessInfo(tid); if (state.selectedTerminalId === tid) renderHarnessInfo(v) }
   if (api.engineStatus && tid) { const v = await api.engineStatus(tid); if (state.selectedTerminalId === tid) renderEngineStatus(v) }

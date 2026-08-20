@@ -217,13 +217,20 @@ function compareVersions(a, b) {
   return 0
 }
 
-// npm 形态检查：探测 registry 最新版本（node -e fetch），官方优先、npmmirror 回退，每个源 3 秒超时快速切换
+// npm 形态检查：探测 registry 最新版本（node -e fetch），官方优先、npmmirror 回退，每个源 3 秒超时快速切换。
+// 2026-08 实测：@deepseek-ai/dsh 的 latest=0.1.0-rc.7、next=0.1.0-rc.8 —— 必须取 dist-tags 中较新者，
+// 只看 latest 会"检查不到更新"（本地 rc.7 永远最新）。URL 必须带 -/package/ 前缀（否则 404）。
 function npmLatestProbe(nodeExe) {
   return async function probeLatest(registry) {
-    const url = `${String(registry).replace(/\/$/, '')}/@deepseek-ai/dsh/latest`
-    const script = 'fetch(process.argv[1]).then(r=>r.json()).then(j=>{console.log(j.version||"")}).catch(()=>process.exit(1))'
-    const r = await run(nodeExe, ['-e', script, url], null, 3000)
-    return r.ok ? r.out.trim() : ''
+    const base = String(registry).replace(/\/$/, '')
+    const script = 'fetch(process.argv[1]).then(r=>r.json()).then(j=>{console.log((j.latest||"")+" "+(j.next||""))}).catch(()=>process.exit(1))'
+    const r = await run(nodeExe, ['-e', script, `${base}/-/package/@deepseek-ai/dsh/dist-tags`], null, 3000)
+    if (!r.ok) return ''
+    const parts = r.out.trim().split(/\s+/).filter(Boolean)
+    const latest = parts[0] || ''
+    const next = parts[1] || ''
+    if (latest && next) return compareVersions(next, latest) > 0 ? next : latest
+    return latest || next || ''
   }
 }
 
