@@ -2025,14 +2025,21 @@ function registerIpc() {
 
   // 启动器自身更新检查：更新源在 config.json 的 updaterUrl 配置，支持多个候选 URL
   // （逗号/空格分隔，如 https://a.com/version.json https://mirror.b.com/version.json），
-  // 每个候选 3 秒超时，按顺序快速切换（直连 → 镜像），全部失败才提示检查失败。
-  // JSON 格式：{ version, url, notes }
+  // 每个候选 3 秒超时，按顺序快速切换（直连 → CDN → 镜像），全部失败才提示检查失败。
+  // JSON 格式：{ version, url, notes }。未配置时默认使用 GitHub 仓库的 launcher-version.json
+  // （官方 raw → jsDelivr CDN → ghfast 镜像，任何网络环境都能取到）。
   ipcMain.handle('launcher:update-check', async () => {
     try {
       const cfg = readJsonFile(configUserPath(), {})
       const raw = String(cfg.updaterUrl || '').trim()
-      const urls = raw.split(/[,，\s]+/).map(u => u.trim()).filter(Boolean)
-      if (!urls.length) return { ok: false, notConfigured: true, version: APP_VERSION, message: '未配置启动器更新源' }
+      let urls = raw.split(/[,，\s]+/).map(u => u.trim()).filter(Boolean)
+      if (!urls.length) {
+        urls = [
+          'https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
+          'https://cdn.jsdelivr.net/gh/mishibeikejie/zat-dsh-launcher@main/launcher-version.json',
+          'https://ghfast.top/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
+        ]
+      }
       let data = null
       for (const url of urls) {
         const controller = new AbortController()
