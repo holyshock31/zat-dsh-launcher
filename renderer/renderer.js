@@ -682,10 +682,10 @@ async function wizardAction(action) {
   // 否则 loading/结果都渲染在隐藏层里，用户看到"点了没反应"。
   if (els.wizard) els.wizard.hidden = false
   if (action === 'fresh') {
-    // 安装位置（0.6.30 用户要求）：已有空终端（用户选过文件夹）→ 直接装到那里；
-    // 否则先让用户选择安装位置（可新建文件夹），再开始安装。
+    // 安装位置（0.6.30 用户要求）：已有用户主动创建的空终端（加号选过文件夹）→ 直接装到那里；
+    // 否则（白板/残留扫描项）先让用户选择安装位置（可新建文件夹），再开始安装。
     const selected = state.terminals.find(t => t.id === state.selectedTerminalId)
-    const hasEmptyTarget = selected && (!selected.dshDir || selected.sourceType === 'fresh-empty' || selected.sourceType === 'fresh-installed-empty')
+    const hasEmptyTarget = selected && !selected.dshDir && (selected.sourceType === 'fresh-empty' || selected.sourceType === 'fresh-installed-empty')
     if (!hasEmptyTarget) {
       if (!await confirm('一键全新安装', '先选择安装位置（可新建文件夹），再把 DeepSeek Harness 装进去。确定继续？')) return
       const created = await api.terminalCreateEmpty()
@@ -836,7 +836,14 @@ async function init() {
     await loadState()
   }
   // 空状态页按钮：一键安装 / 扫描 / 手动
-  if (els.emptyInstall) els.emptyInstall.onclick = () => wizardInstall()
+  // 一键安装（1.0.2 修复）：白板/无用户创建的空终端 → 先选安装位置（可新建文件夹）再安装；
+  // 已有加号创建的 fresh-empty 空终端 → 直接装到那里，不再选位置。
+  if (els.emptyInstall) els.emptyInstall.onclick = () => {
+    const selected = state.terminals.find(t => t.id === state.selectedTerminalId)
+    const hasEmptyTarget = selected && !selected.dshDir && (selected.sourceType === 'fresh-empty' || selected.sourceType === 'fresh-installed-empty')
+    if (hasEmptyTarget) wizardInstall()
+    else wizardAction('fresh')
+  }
   if (els.emptyScan) els.emptyScan.onclick = () => wizardAction('scan')
   if (els.emptyManual) els.emptyManual.onclick = () => wizardAction('manual')
   if (els.wizardClose) els.wizardClose.onclick = () => closeWizard()
