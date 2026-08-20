@@ -682,18 +682,17 @@ async function wizardAction(action) {
   // 否则 loading/结果都渲染在隐藏层里，用户看到"点了没反应"。
   if (els.wizard) els.wizard.hidden = false
   if (action === 'fresh') {
-    // 安装位置（0.6.30 用户要求）：已有用户主动创建的空终端（加号选过文件夹）→ 直接装到那里；
-    // 否则（白板/残留扫描项）先让用户选择安装位置（可新建文件夹），再开始安装。
+    // 一键安装（1.0.2 用户要求：极简，无确认弹窗）：
+    // 没有用户创建的 fresh-empty 空终端 → 直接弹文件夹选择（可新建），选完直接开始装；
+    // 已有 fresh-empty 空终端（加号选过文件夹）→ 直接装到那里。
     const selected = state.terminals.find(t => t.id === state.selectedTerminalId)
     const hasEmptyTarget = selected && !selected.dshDir && (selected.sourceType === 'fresh-empty' || selected.sourceType === 'fresh-installed-empty')
     if (!hasEmptyTarget) {
-      if (!await confirm('一键全新安装', '先选择安装位置（可新建文件夹），再把 DeepSeek Harness 装进去。确定继续？')) return
       const created = await api.terminalCreateEmpty()
       if (!created || !created.ok) { toast(created && created.message || '选择安装位置失败', 'error'); return }
-      if (created.existingDsh) { toast('所选目录已有 DSH，已直接接入'); closeWizard(); await loadState(); return }
+      if (created.existingDsh) { toast('所选目录已包含 DSH，已直接接入（不再安装）'); closeWizard(); await loadState(); return }
       await loadState()
     }
-    if (!await confirm('一键全新安装', '将下载完整 DeepSeek Harness 到所选独立目录（官方 GitHub 优先，国内镜像回退），自举 pnpm、安装依赖并注入 zat-dsh-engine 插件市场，完成后自动启动。\n\n网络进度全程实时可见。确定开始？')) return
     els.wizard.hidden = true
     wizardInstall()
     return
@@ -836,13 +835,19 @@ async function init() {
     await loadState()
   }
   // 空状态页按钮：一键安装 / 扫描 / 手动
-  // 一键安装（1.0.2 修复）：白板/无用户创建的空终端 → 先选安装位置（可新建文件夹）再安装；
-  // 已有加号创建的 fresh-empty 空终端 → 直接装到那里，不再选位置。
-  if (els.emptyInstall) els.emptyInstall.onclick = () => {
+  // 一键安装（1.0.2 用户要求：极简无弹窗）：
+  // 没有 fresh-empty 空终端 → 直接弹文件夹选择（可新建），选完直接装；
+  // 有 fresh-empty 空终端 → 直接装到那里。无任何确认弹窗。
+  if (els.emptyInstall) els.emptyInstall.onclick = async () => {
     const selected = state.terminals.find(t => t.id === state.selectedTerminalId)
     const hasEmptyTarget = selected && !selected.dshDir && (selected.sourceType === 'fresh-empty' || selected.sourceType === 'fresh-installed-empty')
-    if (hasEmptyTarget) wizardInstall()
-    else wizardAction('fresh')
+    if (!hasEmptyTarget) {
+      const created = await api.terminalCreateEmpty()
+      if (!created || !created.ok) { toast(created && created.message || '选择安装位置失败', 'error'); return }
+      if (created.existingDsh) { toast('所选目录已包含 DSH，已直接接入（不再安装）'); await loadState(); return }
+      await loadState()
+    }
+    wizardInstall()
   }
   if (els.emptyScan) els.emptyScan.onclick = () => wizardAction('scan')
   if (els.emptyManual) els.emptyManual.onclick = () => wizardAction('manual')
