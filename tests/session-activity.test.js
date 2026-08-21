@@ -6,7 +6,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { zstdCompressSync } = require('node:zlib')
-const { readSessions, extractSession, summarizeArgs } = require('../src/session-activity')
+const { readSessions, extractSession, summarizeArgs, summarizeMessage } = require('../src/session-activity')
 function tmpDir(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `zat-sess-${label}-`))
 }
@@ -119,6 +119,20 @@ test('summarizeArgs covers common tools safely', () => {
   assert.equal(summarizeArgs('edit', '{"file_path":"a"}'), '编辑文件 a')
   assert.equal(summarizeArgs('unknown', '{"x":1}'), 'unknown')
   assert.equal(summarizeArgs('web_search', 'not-json'), '联网搜索')
+})
+
+// 1.0.8 日志刷屏回归：长回复/多行命令必须摘要化（压换行 + 截断），运行日志不被全文刷屏。
+test('summarizeMessage flattens newlines and truncates long text (1.0.8 刷屏回归)', () => {
+  const long = `## 结论\n\n| 问题 | 状态 |\n|---|---|\n| 3 终端名悬停全名 | ✅ 已解决 |\n\n**修复方向**：摘要时先把所有空白（含换行）压成单个空格，再截断。`.repeat(3)
+  const s = summarizeMessage(long)
+  assert.ok(!s.includes('\n'), '换行必须被压平')
+  assert.ok(s.length <= 123, `截断后长度超限: ${s.length}`)
+  assert.ok(s.endsWith('…'), '长文本应带省略号')
+  // 短消息保持原样
+  assert.equal(summarizeMessage('请帮我检查配置'), '请帮我检查配置')
+  // 多行 here-string 命令：压平后单行可读
+  const cmd = summarizeMessage('$sig = @\nusing System;\npublic class A { }\n@\nAdd-Type $sig')
+  assert.ok(!cmd.includes('\n'), '命令换行必须压平')
 })
 
 test('extractSession aggregates streamed text/tool chunks and user messages', () => {

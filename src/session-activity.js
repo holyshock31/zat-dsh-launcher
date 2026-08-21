@@ -34,9 +34,10 @@ function summarizeArgs(name, args) {
     case 'pwsh': {
       const c = pick('command') || pick('pwsh')
       if (!c) return '运行命令'
-      // 命令原文可能很长（调试脚本/多行命令），摘要截断到 80 字符，
-      // 避免整段命令文本刷进会话日志（用户反馈：日志被"运行命令：$sig=..."刷屏）。
-      return c.length > 80 ? `运行命令：${c.slice(0, 80)}…` : `运行命令：${c}`
+      // 命令原文可能很长（调试脚本/多行命令），压掉换行后截断到 80 字符，
+      // 避免整段命令文本（含多行 here-string）刷进会话日志（用户反馈 1.0.8）。
+      const flat = c.replace(/\s+/g, ' ').trim()
+      return flat.length > 80 ? `运行命令：${flat.slice(0, 80)}…` : `运行命令：${flat}`
     }
     case 'read': return pick('file_path') ? `读取文件 ${pick('file_path')}` : '读取文件'
     case 'read_image': return pick('file_path') ? `查看图片 ${pick('file_path')}` : '查看图片'
@@ -59,6 +60,15 @@ function summarizeArgs(name, args) {
     case 'cordis_undefine': return '删除 Cordis 插件'
     default: return String(name || '工具调用')
   }
+}
+
+// 消息摘要（用户/助手对话内容进运行日志时的显示文本）：
+// 压掉换行/连续空白 + 截断。完整对话内容保留在会话记录里，
+// 运行日志只显示"谁说了什么"的开头，避免长回复/多行代码刷屏（用户反馈 1.0.8）。
+const MSG_SUMMARY_LEN = 120
+function summarizeMessage(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim()
+  return s.length > MSG_SUMMARY_LEN ? `${s.slice(0, MSG_SUMMARY_LEN)}…` : s
 }
 
 // 事件统一摘要。返回 { key, summary, name, time, seq } 或 null（跳过）。
@@ -88,7 +98,7 @@ function summarizeEvent(ev) {
         const id = msg.id || `${seq}-${out.length}`
         out.push({
           key: `msg|${id}`,
-          summary: `${role}：${text}`,
+          summary: `${role}：${summarizeMessage(text)}`,
           name: role === '用户' ? 'user-message' : 'assistant-message',
           time,
           seq,
@@ -104,7 +114,7 @@ function summarizeEvent(ev) {
       const id = msg.id || `asm|${d.turn}|${d.step}`
       return {
         key: `msg|${id}`,
-        summary: `助手：${text}`,
+        summary: `助手：${summarizeMessage(text)}`,
         name: 'assistant-message',
         time,
         seq,
@@ -232,7 +242,7 @@ function extractSession(file, fromByte = 0) {
     for (const [key, agg] of textAgg) {
       if (asmSteps.has(key)) continue // 完整消息已在 assistant/message 输出，跳过碎片
       const text = agg.parts.join('').trim()
-      if (text) events.push({ key: `text|${key}`, summary: `助手：${text}`, name: 'assistant-message', time: agg.time, seq: agg.maxSeq || 0 })
+      if (text) events.push({ key: `text|${key}`, summary: `助手：${summarizeMessage(text)}`, name: 'assistant-message', time: agg.time, seq: agg.maxSeq || 0 })
     }
     textAgg.clear()
   }
@@ -390,4 +400,4 @@ function readSessions(home, limit = 20) {
   return results.slice(0, limit)
 }
 
-module.exports = { readSessions, extractSession, listSessionFiles, summarizeArgs, summarizeEvent }
+module.exports = { readSessions, extractSession, listSessionFiles, summarizeArgs, summarizeEvent, summarizeMessage }
