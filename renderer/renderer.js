@@ -11,7 +11,7 @@ const els = {
   envSwitch: $('env-switch'), envSwitchValue: $('env-switch-value'), envMenu: $('env-menu'), addTerminal: $('btn-add-terminal'), removeTerminal: $('btn-remove-terminal'), harnessVersion: $('harness-version'), harnessUpdateBadge: $('harness-update-badge'), harnessUpdateDetail: $('harness-update-detail'), checkUpdate: $('btn-check-update'), installUpdate: $('btn-install-update'), checkEnv: $('btn-check-env'), repairEnv: $('btn-repair-env'), chooseDsh: $('btn-choose-dsh'), envGrid: $('env-grid'), envPath: $('env-dsh-path'),
   engineStatus: $('engine-status'), engineStatusDetail: $('engine-status-detail'), engineInject: $('btn-engine-inject'), engineRollback: $('btn-engine-rollback'), engineCheck: $('btn-engine-check'), engineUpdateBadge: $('engine-update-badge'),
   launcherVersion: $('launcher-version'), launcherUpdateBadge: $('launcher-update-badge'), launcherUpdateDetail: $('launcher-update-detail'), launcherCheckUpdate: $('btn-launcher-check-update'),
-  rescueStatus: $('rescue-status'), rescueStatusDetail: $('rescue-status-detail'), rescueCreate: $('btn-rescue-create'), rescueRestore: $('btn-rescue-restore'), rescueDiagnose: $('btn-rescue-diagnose'), rescueCopyLog: $('btn-rescue-copy-log'), rescueDiagnoseDetail: $('rescue-diagnose-detail'), rescueIssues: $('rescue-issues'),
+  rescueStatus: $('rescue-status'), rescueStatusDetail: $('rescue-status-detail'), rescueCreate: $('btn-rescue-create'), rescueDiagnose: $('btn-rescue-diagnose'), rescueCopyLog: $('btn-rescue-copy-log'), rescueDiagnoseDetail: $('rescue-diagnose-detail'), rescueIssues: $('rescue-issues'),
   emptyInstall: $('empty-install'), emptyScan: $('empty-scan'), emptyManual: $('empty-manual'), emptyDesc: $('empty-desc'),
   toasts: $('toasts'), modal: $('modal-mask'), modalTitle: $('modal-title'), modalMessage: $('modal-message'), modalOk: $('modal-ok'), modalCancel: $('modal-cancel'),
   wizard: $('wizard-mask'), wizardTitle: $('wizard-title'), wizardBody: $('wizard-body'), wizardClose: $('wizard-close'), wizardBack: $('wizard-back'),
@@ -430,9 +430,8 @@ function renderRescueStatus(info) {  if (!els.rescueStatus || !els.rescueStatusD
     const crash = info && info.lastCrash
     els.rescueStatusDetail.textContent = crash
       ? `上次崩溃 ${new Date(crash.at).toLocaleString('zh-CN', { hour12: false })}${crash.recoveredAt ? '（已恢复，记录保留）' : '（待处理）'}`
-      : 'DSH 每次成功启动后自动更新；也可手动锁定'
+      : '崩溃自动重启，每次成功启动后自动刷新；也可手动锁定'
   }
-  if (els.rescueRestore) els.rescueRestore.disabled = !exists
 }
 
 // ---- 启动器自身更新 ----
@@ -575,7 +574,21 @@ function renderRescueDiagnosis(result) {
       btn.type = 'button'
       btn.className = 'btn btn-ghost'
       btn.textContent = '还原到救援点'
-      btn.onclick = () => { if (els.rescueRestore) els.rescueRestore.onclick() }
+      btn.onclick = async () => {
+        const id = state.selectedTerminalId
+        if (!id) return toast('请先选择终端', 'error')
+        if (!await confirm('还原到救援点', '将把当前终端 profile 配置还原到救援点（上次成功启动的状态），并重启 DSH 生效。确定继续？')) return
+        btn.disabled = true
+        btn.textContent = '还原中…'
+        try {
+          const r = await api.rescueRestore(id)
+          toast(r.message, r.ok ? '' : 'error')
+          if (r.ok) { renderRescueStatus(await api.rescueStatus(id)); renderRescueDiagnosis(await api.rescueDiagnose(id)) }
+        } finally {
+          btn.disabled = false
+          btn.textContent = '还原到救援点'
+        }
+      }
       actions.appendChild(btn)
     } else if (issue.fix === 'restart') {
       // CLI 参数/命令错误：启动器启动前会自动适配参数（如 --no-open 探测），
@@ -896,20 +909,6 @@ async function init() {
     const r = await api.rescueCreate(id)
     toast(r.message, r.ok ? '' : 'error')
     if (r.ok && state.selectedTerminalId === id && seqAtClick === selectionSeq) renderRescueStatus(await api.rescueStatus(id))
-  }
-  if (els.rescueRestore) els.rescueRestore.onclick = async () => {
-    const id = state.selectedTerminalId
-    if (!id) return toast('请先选择终端', 'error')
-    if (!await confirm('还原救援点', '将把当前终端 profile 配置还原到救援点（上次成功启动的状态），并重启 DSH 生效。仅当配置损坏需要整体回滚时使用；普通崩溃建议先用「一键检测」对症修复。确定继续？')) return
-    els.rescueRestore.disabled = true
-    els.rescueRestore.textContent = '还原中…'
-    try {
-      const r = await api.rescueRestore(id)
-      toast(r.message, r.ok ? '' : 'error')
-    } finally {
-      els.rescueRestore.disabled = false
-      els.rescueRestore.textContent = '还原救援点'
-    }
   }
   if (els.rescueDiagnose) els.rescueDiagnose.onclick = async () => {
     const id = state.selectedTerminalId
