@@ -163,17 +163,17 @@
             <div class="harness-version" id="rescue-status-block">
               <div class="harness-version-copy">
                 <div><strong>救援点</strong><span class="version-badge" id="rescue-status">无救援点</span></div>
-                <span class="muted" id="rescue-status-detail">DSH 每次成功启动后自动更新；也可手动锁定</span>
+                <span class="muted" id="rescue-status-detail">DSH 每次成功启动后自动更新；也可手动锁定。仅当配置损坏需整体回滚时使用，普通崩溃请用下方「一键检测」对症修复</span>
               </div>
               <div class="harness-update-actions">
                 <button class="btn btn-ghost" id="btn-rescue-create">创建救援点</button>
-                <button class="btn btn-primary" id="btn-rescue-restore" disabled>一键救援</button>
+                <button class="btn btn-primary" id="btn-rescue-restore" disabled>还原救援点</button>
               </div>
             </div>
             <div class="harness-version" id="rescue-diagnose-block">
               <div class="harness-version-copy">
                 <div><strong>崩溃诊断</strong></div>
-                <span class="muted" id="rescue-diagnose-detail">从本终端启动日志找出崩溃原因，定位坏插件后可直接排除</span>
+                <span class="muted" id="rescue-diagnose-detail">从启动日志找出崩溃原因并给出对症修复按钮；定位到坏插件可直接排除</span>
               </div>
               <div class="harness-update-actions">
                 <button class="btn btn-primary" id="btn-rescue-diagnose">一键检测</button>

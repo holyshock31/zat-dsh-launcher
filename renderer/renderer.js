@@ -574,7 +574,7 @@ function renderRescueDiagnosis(result) {
       const btn = document.createElement('button')
       btn.type = 'button'
       btn.className = 'btn btn-ghost'
-      btn.textContent = '一键救援还原'
+      btn.textContent = '还原到救援点'
       btn.onclick = () => { if (els.rescueRestore) els.rescueRestore.onclick() }
       actions.appendChild(btn)
     } else if (issue.fix === 'restart') {
@@ -900,7 +900,7 @@ async function init() {
   if (els.rescueRestore) els.rescueRestore.onclick = async () => {
     const id = state.selectedTerminalId
     if (!id) return toast('请先选择终端', 'error')
-    if (!await confirm('一键救援', '将把当前终端 profile 还原到救援点（上次成功启动的状态），并重启 DSH 生效。确定继续？')) return
+    if (!await confirm('还原救援点', '将把当前终端 profile 配置还原到救援点（上次成功启动的状态），并重启 DSH 生效。仅当配置损坏需要整体回滚时使用；普通崩溃建议先用「一键检测」对症修复。确定继续？')) return
     els.rescueRestore.disabled = true
     els.rescueRestore.textContent = '还原中…'
     try {
@@ -908,7 +908,7 @@ async function init() {
       toast(r.message, r.ok ? '' : 'error')
     } finally {
       els.rescueRestore.disabled = false
-      els.rescueRestore.textContent = '一键救援'
+      els.rescueRestore.textContent = '还原救援点'
     }
   }
   if (els.rescueDiagnose) els.rescueDiagnose.onclick = async () => {
