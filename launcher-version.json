@@ -1,5 +1,5 @@
 {
-  "version": "1.0.9",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.9/ZAT-DSH-Launcher-Setup-1.0.9.exe",
-  "notes": "v1.0.9 一键安装可靠性修复：移除 npm 装包回退（实测 npm 对 DSH 依赖树解析性能崩塌，7.5 分钟死转导致安装卡死）；安装统一走 pnpm（系统已装或自动自举），镜像源优先、失败明确报错；会话日志对话消息摘要化（长回复不再全文刷屏）。"
+  "version": "1.0.10",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.10/ZAT-DSH-Launcher-Setup-1.0.10.exe",
+  "notes": "v1.0.10 工具链与扫描全面加固：pnpm 三层保障（工具链自举→磁盘探测→自动下载）铺满安装/更新/构建全链路，杜绝"工具链明明在却找不到"；一键扫描修复——递归 2 层扫描常见目录（Documents/Desktop/Dev 等），npm 包根自动识别并归一化（彻底修复 npm 安装的 DSH 检测不到）；白板一键检测能找到装在任意深度的现有 DSH。"
 }
