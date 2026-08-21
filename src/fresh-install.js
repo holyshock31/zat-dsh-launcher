@@ -302,7 +302,9 @@ async function installDependencies(dshDir, pnpmCjs, nodeExe, onProgress, execute
 async function pickRegistry(nodeExe, execute = run) {
   const probe = 'require("node:https").get(process.argv[1], r=>{r.resume();process.exit(0)}).on("error",()=>process.exit(1));setTimeout(()=>process.exit(2),3000)'
   const bin = nodeExe || process.execPath
-  for (const url of ['https://registry.npmjs.org/', 'https://registry.npmmirror.com/']) {
+  // 镜像优先（1.0.9 修复）：国内用户直连 npmjs 慢/断，npmmirror 快且稳；
+  // 官方源仅作为镜像不可用时的兜底（先测镜像，再测官方）。
+  for (const url of ['https://registry.npmmirror.com/', 'https://registry.npmjs.org/']) {
     const r = await execute(bin, ['-e', probe, url], null, 5000)
     if (r.ok && r.code === 0) return url
   }
@@ -748,7 +750,14 @@ async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress
     baseV ? `@deepseek-ai/dsh-base@${baseV}` : '@deepseek-ai/dsh-base@next',
     webV ? `@deepseek-ai/dsh-web-app@${webV}` : '@deepseek-ai/dsh-web-app@next',
   ]
-  const pnpmExe = executablePnpm(findPnpm(), nodeExe)
+  let pnpmExe = executablePnpm(findPnpm(), nodeExe)
+  if (!pnpmExe) {
+    // pnpm 不可用时自举一次（与主包安装一致），绝不回退 npm（依赖树性能崩塌）
+    try {
+      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(os.tmpdir(), 'zat-tools'), onProgress })
+      pnpmExe = executablePnpm(boot, nodeExe)
+    } catch { pnpmExe = '' }
+  }
   if (pnpmExe) {
     if (onProgress) onProgress('依赖', '用 pnpm 安装 profile 官方 bundle（dsh-base / dsh-web-app）…')
     try { fs.writeFileSync(path.join(profileDir, '.npmrc'), 'dangerously-allow-all-builds=true\n', 'utf8') } catch { /* 忽略 */ }
@@ -756,11 +765,9 @@ async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress
     const r = await execute('依赖', pnpmExe, ['add', ...spec, '--dir', profileDir, '--registry', registry, '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
     if (check()) return { ok: true }
   }
-  const npmCli = await ensureNpmCli({ nodeExe, toolsDir, onProgress })
-  if (onProgress) onProgress('依赖', '用 npm 安装 profile 官方 bundle…')
-  await execute('依赖', nodeExe, [npmCli, 'install', ...spec, '--no-audit', '--no-fund', '--prefix', profileDir, '--registry', registry], undefined, onProgress, 10 * 60 * 1000, envForCli)
-  if (check()) return { ok: true }
-  return { ok: false, message: 'profile 官方 bundle 安装失败（dsh-base / dsh-web-app 未实装）' }
+  // npm 回退已移除（1.0.9）：npm 对 @deepseek-ai/* 依赖树解析性能崩塌（实测死转），
+  // pnpm 均失败时明确报错，绝不掉进 npm 白等。
+  return { ok: false, message: 'profile 官方 bundle 安装失败（dsh-base / dsh-web-app 未实装，pnpm 不可用）' }
 }
 
 // 修补 DSH 的 subprocess-local 实现：child_process.spawn 加 windowsHide: true，
@@ -880,7 +887,7 @@ async function resolvePackageVersion(nodeExe, pkgName, timeoutMs = 3000) {
 // ★ 主路径：一键安装 = 下载官方预构建包（npm registry 官方优先/国内回退，进度实时）。
 // 优先用机器上已装的 pnpm（store 缓存命中快）；没有 pnpm 才自举 npm CLI。
 // 装完 lib/bin.js 直接可运行，零编译。targetDir 为独立新环境根目录。
-async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress, execute = runWithProgress }) {
+async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress, execute = runWithProgress, pnpmExe = '' }) {
   const dshDir = path.join(targetDir, 'node_modules', '@deepseek-ai', 'dsh')
   if (fs.existsSync(path.join(dshDir, 'lib', 'bin.js'))) {
     if (onProgress) onProgress('下载', `官方 DSH 已存在（${dshDir}），跳过下载`)
@@ -898,8 +905,18 @@ async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress
     if (v) spec = `${DSH_NPM_PACKAGE}@${v}`
   } catch { /* 回退标签 */ }
   // 1) 优先 pnpm（已装则 store 缓存命中，秒级；.cjs 形态转 pnpm.cmd 包装再执行）
-  const pnpmExe = executablePnpm(findPnpm(), nodeExe)
-  if (pnpmExe) {
+  // 显式传入的 pnpmExe（调用方工具链自举的）优先；没有才回退磁盘探测 + 自举。
+  // ★ pnpm 是唯一可靠主路径（npm 对 dsh 依赖树解析性能崩塌，实测 7.5 分钟死转），
+  //   自举失败也绝不直接掉进 npm——先尝试 ensurePnpm 自举一次（1.0.9 修复）。
+  let pnpmExeResolved = pnpmExe || executablePnpm(findPnpm(), nodeExe)
+  if (!pnpmExeResolved) {
+    try {
+      if (onProgress) onProgress('下载', '未找到 pnpm，正在自举（微秒级，仅首次）…')
+      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(os.tmpdir(), 'zat-tools'), onProgress })
+      pnpmExeResolved = executablePnpm(boot, nodeExe)
+    } catch { pnpmExeResolved = '' }
+  }
+  if (pnpmExeResolved) {
     if (onProgress) onProgress('下载', `用 pnpm 从 ${registry} 安装 ${spec}…`)
     // pnpm 11 需要通过 .npmrc 允许原生构建脚本（node-pty/esbuild/koffi），否则这些包被忽略。
     try { fs.writeFileSync(path.join(targetDir, '.npmrc'), 'dangerously-allow-all-builds=true\n', 'utf8') } catch { /* 忽略 */ }
@@ -907,26 +924,19 @@ async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress
     //   所有终端共享同一份原生模块（如 sharp）——3080 加载着它时，其它终端里同版本
     //   的文件永远删不掉（0.6.29 删除残留根因，nlink=8 实测证实）。
     //   copy 模式让每个终端完全独立拷贝：删除/更新互不影响，真正"终端 100% 独立"。
-    const r = await execute('下载', pnpmExe, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
+    const r = await execute('下载', pnpmExeResolved, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], undefined, onProgress, 10 * 60 * 1000, envForCli)
     // 以 bin.js 就位为准：pnpm 可能因原生构建脚本被忽略而返回非 0（ERR_PNPM_IGNORED_BUILDS），
     // 但预构建包本体已安装成功。缺失的原生模块由 DSH 首次启动时按需处理。
     if (fs.existsSync(path.join(dshDir, 'lib', 'bin.js'))) {
       if (onProgress) onProgress('下载', '官方 DSH 下载完成（预构建，直接可用）')
       return { ok: true, dshDir }
     }
-    if (onProgress) onProgress('下载', 'pnpm 安装未成功，回退 npm…')
-  }
-  // 2) 回退 npm CLI（自举一次，后续复用）
-  const npmCli = await ensureNpmCli({ nodeExe, toolsDir, onProgress })
-  if (onProgress) onProgress('下载', `用 npm 从 ${registry} 安装 ${spec}…`)
-  const r = await execute('下载', nodeExe, [npmCli, 'install', spec, '--no-audit', '--no-fund', '--prefix', targetDir, '--registry', registry], undefined, onProgress, 10 * 60 * 1000, envForCli)
-  if (!r.ok) {
     const detail = (r.err || r.out || '').trim().split(/\r?\n/).slice(-3).join(' | ')
-    return { ok: false, message: `官方包下载失败：${detail}` }
+    return { ok: false, message: `pnpm 安装失败：${detail || '无输出'}` }
   }
-  if (!fs.existsSync(path.join(dshDir, 'lib', 'bin.js'))) return { ok: false, message: '下载完成但缺少 dsh 可执行入口' }
-  if (onProgress) onProgress('下载', '官方 DSH 下载完成（预构建，直接可用）')
-  return { ok: true, dshDir }
+  // pnpm 自举失败：明确报错，绝不回退 npm（npm 对 dsh 依赖树解析性能崩塌，实测 7.5 分钟死转，
+  // 回退只会让用户再白等 3~6 分钟 —— 1.0.9 移除 npm 装包路径）。
+  return { ok: false, message: '未找到 pnpm 且自举失败（网络或环境问题），请检查网络后重试' }
 }
 
 // 更新 npm 包形态的 DSH：pnpm add @deepseek-ai/dsh@latest --dir <终端根>（复用主下载路径，store 命中快）。

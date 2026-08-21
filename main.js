@@ -1934,13 +1934,16 @@ async function installFreshTerminal(options = {}) {
   const installExecute = makeToolchainExecute(installTcEnv)
   onProgress('准备', `端口 ${port} 已安全分配，安装到独立目录 ${root}（与 3080 完全隔离）`)
   try {
-    // ★ 主路径：下载官方预构建包（npm registry 官方优先/国内回退，自带前端 dist，即装即跑，零编译）
+    // ★ 主路径：下载官方预构建包（镜像优先/官方回退，自带前端 dist，即装即跑，零编译）
+    // 显式传入工具链自举好的 pnpmExe：不依赖 installOfficialPackage 内部二次探测
+    // （findPnpm 可能因缓存文件名/路径差异返回空，导致误走 npm 回退 —— 1.0.9 修复）
     const dl = await freshInstall.installOfficialPackage({
       nodeExe,
       toolsDir: path.join(root, '.tools'),
       targetDir: root,
       onProgress,
       execute: installExecute,
+      pnpmExe: installTcEnv.pnpmExe || '',
     })
     if (!dl.ok) { cleanInstallArtifacts(root); return { ok: false, message: dl.message } }
     if (!fs.existsSync(path.join(dshDir, 'lib', 'bin.js'))) {
