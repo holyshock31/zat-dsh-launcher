@@ -31,7 +31,13 @@ function summarizeArgs(name, args) {
   switch (String(name || '')) {
     case 'web_search': return pick('query') ? `搜索「${pick('query')}」` : '联网搜索'
     case 'web': return pick('url') ? `访问 ${pick('url')}` : '访问网页'
-    case 'pwsh': { const c = pick('command') || pick('pwsh'); return c ? `运行命令：${c}` : '运行命令' }
+    case 'pwsh': {
+      const c = pick('command') || pick('pwsh')
+      if (!c) return '运行命令'
+      // 命令原文可能很长（调试脚本/多行命令），摘要截断到 80 字符，
+      // 避免整段命令文本刷进会话日志（用户反馈：日志被"运行命令：$sig=..."刷屏）。
+      return c.length > 80 ? `运行命令：${c.slice(0, 80)}…` : `运行命令：${c}`
+    }
     case 'read': return pick('file_path') ? `读取文件 ${pick('file_path')}` : '读取文件'
     case 'read_image': return pick('file_path') ? `查看图片 ${pick('file_path')}` : '查看图片'
     case 'write': return pick('file_path') ? `写入文件 ${pick('file_path')}` : '写入文件'

@@ -132,6 +132,7 @@ function renderEnvs(list, current) {
     item.dataset.id = terminal.id
     item.setAttribute('role', 'option')
     item.innerHTML = `<span class="env-menu-marker">${marker}</span><span class="env-menu-text">${terminal.name} · :${terminal.port}</span>`
+    item.title = `${terminal.name}（端口 ${terminal.port}）`
     item.onclick = () => {
       closeEnvMenu()
       selectTerminal(terminal.id)
@@ -148,6 +149,8 @@ function renderEnvSwitchValue() {
   els.envSwitchValue.textContent = current
     ? `${current.runtime && current.runtime.running ? '●' : current.runtime && current.runtime.starting ? '◐' : '○'} ${current.name} · :${current.port}`
     : '选择终端…'
+  // 名称被省略号截断时悬停显示全名（终端选择器宽度有限，长名看不到结尾）
+  els.envSwitchValue.title = current ? `${current.name}（端口 ${current.port}）` : ''
 }
 
 function toggleEnvMenu() {
