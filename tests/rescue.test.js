@@ -181,6 +181,17 @@ test('diagnoseCrash detects spawn ENOENT toolchain crash (#2990)', () => {
   assert.equal(issues[0].fix, 'restart', '工具链缺失重启即由启动器自动自举')
 })
 
+test('diagnoseCrash detects missing-module (Cannot find package) with exclude fix', () => {
+  const logs = [
+    "Error: Cannot find package '@deepseek-ai/dsh-client-ui-xyz' imported from cordis.yml",
+  ]
+  const r = diagnoseCrash(logs)
+  const issues = r.issues.filter(i => i.type === 'missing-module')
+  assert.equal(issues.length, 1, `应识别出 missing-module: ${JSON.stringify(r.issues)}`)
+  assert.equal(issues[0].plugin, '@deepseek-ai/dsh-client-ui-xyz')
+  assert.equal(issues[0].fix, 'exclude-bundle', '缺依赖必须走排除插件（L1 对症修复），不能只重启')
+})
+
 test('excludePlugin removes only the bad bundle, keeps others and node_modules', () => {
   const dir = tmp('ex')
   try {

@@ -873,7 +873,7 @@ async function runAutoFixLevel(terminalId, p, issue, level) {
         if (r.ok) { logStep('profile 依赖已重装（与主包版本匹配）'); return true }
         logStep(`重装失败：${r.message}`); return false
       }
-      if ((issue.type === 'missing-bundle' || issue.type === 'plugin-failed' || issue.type === 'duplicate-plugin') && issue.plugin) {
+      if ((issue.type === 'missing-bundle' || issue.type === 'plugin-failed' || issue.type === 'duplicate-plugin' || issue.type === 'missing-module') && issue.plugin) {
         const r = rescue.excludePlugin(p.profileDir, issue.plugin)
         if (r.ok) { logStep(`已排除插件「${issue.plugin}」（保留其它插件）`); return true }
         logStep(`排除插件「${issue.plugin}」失败：${r.message}`); return false
