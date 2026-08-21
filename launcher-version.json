@@ -1,5 +1,5 @@
 {
-  "version": "1.0.11",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.11/ZAT-DSH-Launcher-Setup-1.0.11.exe",
-  "notes": "v1.0.11 安装/更新可靠性终极加固：内置 pnpm（安装包自带 12MB 官方单文件，零下载零安装，全新机器离线即用）；源码形态缺依赖（tsx）自动识别并一键安装，启动前自动装依赖（不再启动即崩）；工具链统一共享目录（首个/第二个终端/更新/救援全一致）；引擎/克隆默认执行器带自举 git PATH。"
+  "version": "1.0.12",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.12/ZAT-DSH-Launcher-Setup-1.0.12.exe",
+  "notes": "v1.0.12 关键修复：工具目录统一 realpath 长路径——Windows 短路径（如 C:\\Users\\用户名~1）会导致 pnpm 模块解析失败（启动即崩，长用户名/含空格用户机器），现在全链路用完整长路径；一键扫描排除已识别 DSH 根的深层子目录（apps\\cli 等不再误判成独立安装）；内置 pnpm 零下载零安装；源码缺依赖自动装。"
 }
