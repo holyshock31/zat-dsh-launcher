@@ -2143,7 +2143,9 @@ function registerIpc() {
     const tcEnv = await getToolchainEnv(id)
     const updateExecute = makeToolchainExecute(tcEnv)
     pushTerminalLog(id, 'info', '正在检查并安装 Harness 更新…')
-    const pnpmExe = freshInstall.executablePnpm(freshInstall.findPnpm(), findNodeExe()) || null
+    // ★ 用工具链已自举的 pnpmExe，绝不重新探测（findPnpm 可能因缓存路径差异返回空 →
+    //   更新链路 pnpm 为空导致依赖安装失败。1.0.10 修复）。
+    const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), findNodeExe()) || null
     const result = await installHarnessUpdate(p.dshDir, snapshotDir, updateExecute, {
       pnpmExe,
       probeLatest: harnessUpdate.npmLatestProbe(findNodeExe()),
@@ -2154,6 +2156,8 @@ function registerIpc() {
         const up = await freshInstall.updateNpmPackage({
           nodeExe: findNodeExe(),
           targetDir: p.home,
+          toolsDir: path.join(p.home, '.tools'),
+          pnpmExe: tcEnv.pnpmExe || '',
           onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
         })
         if (!up.ok) return up

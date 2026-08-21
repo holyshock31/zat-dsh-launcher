@@ -235,3 +235,16 @@ test('scanDshInstallations 识别 npm 包形态（显式目录 + 运行实例均
   assert.equal(results2[0].source, 'filesystem')
   assert.equal(results2[0].port, null)
 })
+
+// 1.0.10 回归：直接传 npm 包根（node_modules\@deepseek-ai\dsh）必须识别并归一化到项目根。
+// 旧逻辑 inspectDshDir 对包根判 null → "npm 安装的 DSH 检测不到"（用户反馈）。
+test('inspectDshDir 识别 npm 包根并归一化到项目根', () => {
+  const npmRoot = makeFakeNpmDshRoot('pkgroot', { version: '0.1.1-rc.2' })
+  try {
+    const pkgRoot = path.join(npmRoot, 'node_modules', '@deepseek-ai', 'dsh')
+    const r = inspectDshDir(pkgRoot)
+    assert.ok(r, 'npm 包根应被识别为 DSH')
+    assert.equal(r.mode, 'npm')
+    assert.equal(path.resolve(r.dir).toLowerCase(), npmRoot.toLowerCase(), '必须归一化到项目根（DSH_HOME）')
+  } finally { fs.rmSync(npmRoot, { recursive: true, force: true }) }
+})

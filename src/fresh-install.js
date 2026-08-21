@@ -941,12 +941,21 @@ async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress
 
 // 更新 npm 包形态的 DSH：pnpm add @deepseek-ai/dsh@latest --dir <终端根>（复用主下载路径，store 命中快）。
 // targetDir = 终端根（含 node_modules/@deepseek-ai/dsh）。零编译，更新后等用户启动生效。
-async function updateNpmPackage({ nodeExe, targetDir, onProgress, execute = runWithProgress }) {
+async function updateNpmPackage({ nodeExe, targetDir, toolsDir, onProgress, execute = runWithProgress, pnpmExe = '' }) {
   const dshDir = path.join(targetDir, 'node_modules', '@deepseek-ai', 'dsh')
   if (!fs.existsSync(path.join(dshDir, 'package.json'))) return { ok: false, message: '该终端不是 npm 包形态的 DSH，无法用此方式更新' }
   const registry = await pickRegistry(nodeExe)
-  const pnpmExe = executablePnpm(findPnpm(), nodeExe)
-  if (!pnpmExe) return { ok: false, message: '未找到 pnpm，无法更新 npm 包形态的 DSH' }
+  // pnpm 三层保障（1.0.10）：调用方自举的 pnpmExe → 磁盘探测 → 自举；绝不裸探测失败即死
+  // （同 installOfficialPackage，杜绝"工具链明明自举好却因探测差异找不到"）
+  let pnpm = pnpmExe || executablePnpm(findPnpm(), nodeExe)
+  if (!pnpm) {
+    try {
+      if (onProgress) onProgress('更新', '未找到 pnpm，正在自举…')
+      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(os.tmpdir(), 'zat-tools'), onProgress })
+      pnpm = executablePnpm(boot, nodeExe)
+    } catch { pnpm = '' }
+  }
+  if (!pnpm) return { ok: false, message: '未找到 pnpm 且自举失败（网络或环境问题），请检查网络后重试' }
   // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
   const toolchainEnv = execute && execute.env || null
   const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
@@ -960,7 +969,7 @@ async function updateNpmPackage({ nodeExe, targetDir, onProgress, execute = runW
   // pnpm 11 默认忽略依赖构建脚本并返回非 0（ERR_PNPM_IGNORED_BUILDS）——
   // 必须显式允许，否则原生模块（如 subprocess-local）缺失且更新被误判失败。
   // 宽容兜底：即使返回非 0，只要目标版本已就位就算成功（ignored-builds 场景包已装上）。
-  const r = await execute('更新', pnpmExe, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.package-import-method=copy', '--config.dangerously-allow-all-builds=true'], undefined, onProgress, 10 * 60 * 1000, envForCli)
+  const r = await execute('更新', pnpm, ['add', spec, '--dir', targetDir, '--registry', registry, '--config.package-import-method=copy', '--config.dangerously-allow-all-builds=true'], undefined, onProgress, 10 * 60 * 1000, envForCli)
   if (!r.ok) {
     const detail = (r.err || r.out || '').trim().split(/\r?\n/).slice(-3).join(' | ')
     // 已就位判定：目标版本出现在输出里（pnpm 会打印 "+ @deepseek-ai/dsh <version>"）

@@ -51,6 +51,19 @@ function inspectDshDir(value) {
       return { dir, version: String(pkg.version || '未知'), name: path.basename(dir) || 'DeepSeek Harness', mode: 'npm' }
     } catch { return null }
   }
+  // ★ npm 包根形态（1.0.10 修复）：传入目录本身是 @deepseek-ai/dsh 包根
+  //   （旧版登记格式/用户手动选到包目录），归一化到项目根（DSH_HOME）。
+  //   旧逻辑在这里直接判 null，导致"npm 安装的 DSH 检测不到"（用户反馈）。
+  const selfPkgFile = path.join(dir, 'package.json')
+  if (fs.existsSync(selfPkgFile) && fs.existsSync(path.join(dir, 'lib', 'bin.js'))) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(selfPkgFile, 'utf8'))
+      if (pkg.name === '@deepseek-ai/dsh' && pkg.bin && pkg.bin.dsh) {
+        const root = normalizeNpmRoot(dir)
+        return { dir: root, version: String(pkg.version || '未知'), name: path.basename(root) || 'DeepSeek Harness', mode: 'npm' }
+      }
+    } catch { /* 无效包 */ }
+  }
   return null
 }
 
@@ -214,16 +227,49 @@ async function scanDshInstallations(options = {}) {
     for (const name of names) out.push(path.join(base, name))
     return out
   }
+  // ★ 递归扫描（1.0.10 修复）：用户把 DSH 装在多级目录（如 D:\工具\环境\DSH）时
+  //   旧逻辑只扫"用户主目录一级+每盘根一级"检测不到。现在从常见起点递归 2 层，
+  //   配合内容识别（inspectDshDir）精确过滤，误扫成本可控（每级目录多读少量 package.json）。
+  const collectDeepDirs = (base, depth) => {
+    const out = []
+    if (depth > 2) return out
+    let entries = []
+    try { entries = fs.readdirSync(base, { withFileTypes: true }) } catch { return out }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      // 跳过无关大目录（扫描性能 + 避免权限异常）
+      if (['node_modules', '$RECYCLE.BIN', 'System Volume Information', 'Windows', 'Program Files', 'Program Files (x86)'].includes(e.name)) continue
+      try {
+        const full = path.join(base, e.name)
+        // 命名的直接子目录先全部纳入（含深一层）
+        out.push(full)
+        const next = collectDeepDirs(full, depth + 1)
+        for (const n of next) out.push(n)
+      } catch { /* 单个访问失败跳过 */ }
+    }
+    return out
+  }
   try {
     const home = os.homedir()
     // 用户主目录一级：任意名字的目录都可能装着 DSH（npm 包形态常见）
     if (scanDrives) for (const dir of collectLevel1Dirs(home)) common.push(dir)
+    // 用户主目录再深两级（Documents/Desktop/Downloads 下常见）
+    if (scanDrives) {
+      for (const dir of ['Documents', 'Desktop', 'Downloads', 'dev', 'Dev', 'developer', 'code', 'Code']) {
+        const full = path.join(home, dir)
+        if (fs.existsSync(full)) for (const d of collectDeepDirs(full, 0)) common.push(d)
+      }
+    }
     // 每个磁盘根目录一级：任意名字（如 D:\2），内容识别后自动过滤非 DSH
     if (scanDrives) {
       for (let code = 65; code <= 90; code++) {
         const root = `${String.fromCharCode(code)}:\\`
         try {
-          if (fs.existsSync(root)) for (const dir of collectLevel1Dirs(root)) common.push(dir)
+          if (fs.existsSync(root)) {
+            for (const dir of collectLevel1Dirs(root)) common.push(dir)
+            // 每盘根再深两级（用户自选路径常见，如 D:\环境\DSH 或 D:\工具\代理\harness）
+            for (const d of collectDeepDirs(root, 0)) common.push(d)
+          }
         } catch { /* 盘符不可访问则跳过 */ }
       }
     }

@@ -109,7 +109,16 @@ async function runBuild(dshDir, execute, env, pnpmExe, onStep) {
     const libErr = String(r.err || r.out || '').slice(-1500)
     // 3) 兜底：pnpm run build
     step('build:lib 未通过，最后兜底：pnpm run build')
-    const p = await execute(pnpmExe || null, ['run', 'build'], dshDir, 25 * 60 * 1000, buildEnv)
+    // pnpm 三段保障（1.0.10）：传入 → 探测 → 自举；null 时 execute(null) 必败（误导"兜底失败"）
+    let pnpmFallback = pnpmExe || null
+    if (!pnpmFallback) {
+      const fi = require('./fresh-install')
+      pnpmFallback = fi.executablePnpm(fi.findPnpm(), process.execPath)
+      if (!pnpmFallback) {
+        try { pnpmFallback = fi.executablePnpm(await fi.ensurePnpm({ nodeExe: process.execPath, toolsDir: path.join(os.tmpdir(), 'zat-tools') }), process.execPath) } catch { /* 放弃兜底 */ }
+      }
+    }
+    const p = await execute(pnpmFallback || null, ['run', 'build'], dshDir, 25 * 60 * 1000, buildEnv)
     if (p.ok) return { ok: true, used: 'pnpm run build（兜底）' }
     return { ok: false, err: `build:lib 失败：${libErr}；pnpm 兜底也失败：${String(p.err || p.out || '').slice(-800)}` }
   }
@@ -406,7 +415,22 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
   const merge = await execute('git', ['merge', '--ff-only', info.remoteRef], dshDir, 120000)
   if (!merge.ok) return { ...info, ok: false, message: `更新快进失败：${merge.err || merge.out}` }
   step(`代码已更新（${info.behindCount} 个新提交），正在安装依赖…`)
-  const pnpm = options.pnpmExe || null
+  let pnpm = options.pnpmExe || null
+  if (!pnpm) {
+    // pnpm 三层保障（1.0.10）：显式传入 → 磁盘探测 → 自举，否则 git 形态更新的
+    // 依赖安装 execute(null) 直接失败（"依赖安装失败"误导用户）。
+    const fi = require('./fresh-install')
+    pnpm = fi.executablePnpm(fi.findPnpm(), process.execPath)
+    if (!pnpm) {
+      step('未找到 pnpm，正在自举…')
+      try {
+        const boot = await fi.ensurePnpm({ nodeExe: process.execPath, toolsDir: path.join(os.tmpdir(), 'zat-tools'), onProgress: step })
+        pnpm = fi.executablePnpm(boot, process.execPath)
+      } catch (e) {
+        step(`pnpm 自举失败：${e && e.message || e}`)
+      }
+    }
+  }
   // 依赖安装四连：frozen 镜像 → frozen 官方 → 非 frozen 镜像 → 非 frozen 官方。
   // 国内网络直连 npmjs 常断（UND_ERR_DESTROYED），镜像优先命中率最高；
   // 非 frozen（--no-frozen-lockfile）专门解决 lockfile 与 package.json 失配
