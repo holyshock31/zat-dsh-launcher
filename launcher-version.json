@@ -1,5 +1,5 @@
 {
-  "version": "1.0.6",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.6/ZAT-DSH-Launcher-Setup-1.0.6.exe",
-  "notes": "v1.0.6 救援中心全面升级：崩溃自动恢复阶梯（L1 对症修复→L2 完整恢复→L3 工厂重置），小白玩崩后无感自动回到可用状态；崩溃诊断矩阵扩展（loader entry 缺失 / 插件重复注册 / 工具链 ENOENT / prepare 未注册 / 缺依赖）；bundle 错配一键重装依赖修复；按钮职责分离（还原救援点收进诊断区）。"
+  "version": "1.0.7",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.7/ZAT-DSH-Launcher-Setup-1.0.7.exe",
+  "notes": "v1.0.7 更新体验全面提速：源码树形态更新提速 5.5 倍（增量编译优先，产物缺失才全量重编，实测 3.5 分钟→38 秒）；更新完成后自动重启生效（点完按钮即完事，不再手动启动）；更新全程实时步骤日志（代码拉取/依赖安装/编译进度逐条显示）；崩溃自动恢复阶梯 L1 对症修复→L2 完整恢复→L3 工厂重置。"
 }
