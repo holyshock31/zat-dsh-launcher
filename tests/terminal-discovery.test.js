@@ -248,3 +248,34 @@ test('inspectDshDir 识别 npm 包根并归一化到项目根', () => {
     assert.equal(path.resolve(r.dir).toLowerCase(), npmRoot.toLowerCase(), '必须归一化到项目根（DSH_HOME）')
   } finally { fs.rmSync(npmRoot, { recursive: true, force: true }) }
 })
+
+// 1.0.12 回归：同一 DSH 的深层子目录（apps\cli 等）不得被当成独立安装——
+// 浅目录优先 accepted，深层子目录自动跳过（用户截图：扫出 deepseek-harness 和 apps\cli 两个）。
+test('scanDshInstallations 排除已识别 DSH 根的深层子目录', async () => {
+  // 真实场景：D:\deepseek-harness 是源码形态（根带 workspaces + apps/cli），
+  // apps\cli 下 pnpm workspace 软链 node_modules\@deepseek-ai\dsh → 被误判成独立安装。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-src-sub-'))
+  try {
+    fs.mkdirSync(path.join(root, 'apps', 'cli'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-root',
+      version: '0.1.1-rc.2',
+      workspaces: ['apps/*', 'packages/*/*'],
+    }, null, 2))
+    // apps\cli 下造假 npm 形态（workspace 软链特征）
+    const cliDir = path.join(root, 'apps', 'cli')
+    const cliNpmDir = path.join(cliDir, 'node_modules', '@deepseek-ai', 'dsh')
+    fs.mkdirSync(path.join(cliNpmDir, 'lib'), { recursive: true })
+    fs.writeFileSync(path.join(cliNpmDir, 'lib', 'bin.js'), 'console.log("dsh")\n')
+    fs.writeFileSync(path.join(cliNpmDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.2', bin: { dsh: 'lib/bin.js' } }, null, 2))
+    fs.writeFileSync(path.join(cliDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-cli' }, null, 2))
+
+    const results = await scanDshInstallations({
+      explicit: [root, cliDir],
+      processEntries: [],
+      scanDrives: false,
+    })
+    assert.equal(results.length, 1, `深层子目录应被排除,只留最浅根: ${JSON.stringify(results.map(r => r.dir))}`)
+    assert.equal(path.resolve(results[0].dir).toLowerCase(), root.toLowerCase())
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

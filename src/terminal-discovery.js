@@ -287,17 +287,26 @@ async function scanDshInstallations(options = {}) {
     }
   }
   const seen = new Set()
+  const acceptedRoots = [] // 已接受的 DSH 根，用于排除同一 DSH 的深层子目录（如 apps\cli 误判）
   const results = []
   const consider = (dir, meta) => {
     const inspected = inspectDshDir(dir)
     if (!inspected) return
     const key = normalizeDshPath(inspected.dir)
     if (seen.has(key)) return
+    // ★ 子目录跳过（1.0.12）：已识别 DSH 根的子目录（如 D:\deepseek-harness\apps\cli）是同一
+    //   DSH 的深层目录（pnpm workspace 软链让 apps\cli\node_modules\@deepseek-ai\dsh 被误认成
+    //   独立安装），绝不能接入成第二个终端（DSH_HOME/profile/端口互相打架）。
+    //   浅目录先 to 入 acceptedRoots（运行实例/显式目录/深度浅的优先），子路径自动排除。
+    if (acceptedRoots.some(root => key.startsWith(root + '\\') || key.startsWith(root + '/'))) return
     seen.add(key)
+    acceptedRoots.push(key)
     results.push({ ...inspected, source: meta.source, port: meta.port || null, pid: meta.pid || null })
   }
   for (const item of running) consider(item.root, { source: 'running-process', port: item.port, pid: item.pid })
-  for (const dir of [...explicit, ...common]) consider(dir, { source: 'filesystem' })
+  // 显式目录最优先（用户明确指定），随后常见位置按深度排序（浅的先 accepted，深的子目录被排除）
+  const sortedCommon = [...explicit, ...common].sort((a, b) => normalizeDshPath(a).length - normalizeDshPath(b).length)
+  for (const dir of sortedCommon) consider(dir, { source: 'filesystem' })
   return results
 }
 
