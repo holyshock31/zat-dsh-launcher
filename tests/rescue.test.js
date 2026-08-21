@@ -5,7 +5,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { createRescueSnapshot, rescueStatus, restoreRescueSnapshot, listBundles, diagnoseCrash, excludePlugin, recordCrash, markCrashRecovered } = require('../src/rescue')
+const { createRescueSnapshot, rescueStatus, restoreRescueSnapshot, listBundles, diagnoseCrash, excludePlugin, recordCrash, markCrashRecovered, factoryResetProfile, FACTORY_BUNDLES } = require('../src/rescue')
 
 function tmp(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `zat-rescue-${label}-`))
@@ -199,4 +199,25 @@ test('excludePlugin removes only the bad bundle, keeps others and node_modules',
 test('listBundles returns empty for missing profile', () => {
   const dir = tmp('lb')
   try { assert.deepEqual(listBundles(path.join(dir, 'nope')), []) } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('factoryResetProfile backs up configs and writes minimal usable profile (L3)', () => {
+  const dir = tmp('l3')
+  try {
+    const profile = path.join(dir, 'profiles', 'web')
+    const backup = path.join(dir, 'factory-backups')
+    fs.mkdirSync(profile, { recursive: true })
+    fs.writeFileSync(path.join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'bad-plugin', 'another-bad'] } } }, null, 2))
+    fs.writeFileSync(path.join(profile, 'cordis.yml'), '- id: bad-plugin\n- id: another-bad\n')
+    fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), '- insert:\n    - id: custom\n')
+    const r = factoryResetProfile(profile, backup)
+    assert.equal(r.ok, true)
+    // 备份目录含原配置
+    assert.ok(fs.existsSync(path.join(backup, 'package.json')))
+    assert.ok(fs.existsSync(path.join(backup, 'cordis.yml')))
+    // 重建后 profile 仅官方 bundle、无自定义插件
+    const pkg = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'))
+    assert.deepEqual(pkg.dsh.profile.bundles, FACTORY_BUNDLES)
+    assert.ok(!fs.readFileSync(path.join(profile, 'cordis.yml'), 'utf8').includes('bad-plugin'))
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })

@@ -851,59 +851,81 @@ function findNodeExe() {
   return '' // 没有可用的 node：如实返回空，由调用方给出明确提示
 }
 
-// 崩溃自动修复（1.0.6）：诊断命中已知问题后，按问题类型执行对症修复。
-// 确定性崩溃（配置损坏 / 依赖错配 / 插件冲突）盲目重启多少次都一样，
-// 必须先把根因修掉再重启。返回 true = 修复完成（可重启）；false = 修复不可用/失败。
-async function runAutoFix(terminalId, p, issue) {
+// 崩溃自动恢复阶梯执行器（1.0.6）：按级别执行对应恢复动作，返回 true = 本级完成可重启。
+//   L1 对症修复：配置坏→还原救援点 / 依赖错配→重装依赖 / 插件冲突→排除
+//   L2 完整恢复：还原救援点 + 强制重装全部官方依赖（配置与依赖一起回到好状态）
+//   L3 工厂重置：备份现有配置 → 重建最小可用 profile（仅官方插件）→ 重装依赖
+async function runAutoFixLevel(terminalId, p, issue, level) {
+  const rescueDir = rescue.rescueDirFor(app.getPath('userData'), terminalId)
+  const logStep = (msg) => pushTerminalLog(terminalId, 'info', `[自动恢复 L${level}] ${msg}`)
   try {
-    if (issue.type === 'bad-profile') {
-      // 配置损坏：还原救援点（上次成功启动的 profile 配置）
-      const rescueDir = rescue.rescueDirFor(app.getPath('userData'), terminalId)
-      const status = rescue.rescueStatus(rescueDir)
-      if (!status.exists) {
-        pushTerminalLog(terminalId, 'warn', '配置损坏但无救援点，无法自动还原（建议先手动创建救援点）')
-        return false
+    // L1：对症修复（只处理诊断命中的方向）
+    if (level === 1) {
+      if (issue.type === 'bad-profile') {
+        if (!rescue.rescueStatus(rescueDir).exists) { logStep('配置损坏但无救援点，本级跳过'); return false }
+        const r = rescue.restoreRescueSnapshot(p.profileDir, rescueDir)
+        if (r.ok) { logStep(`已还原救援点配置（${r.files.join('、')}）`); return true }
+        logStep(`还原救援点失败：${r.message}`); return false
       }
-      const r = rescue.restoreRescueSnapshot(p.profileDir, rescueDir)
-      if (r.ok) {
-        pushTerminalLog(terminalId, 'info', `已自动还原救援点配置（${r.files.join('、')}）`)
-        return true
+      if (issue.type === 'bundle-mismatch') {
+        logStep('重装 profile 官方依赖…')
+        const r = await reinstallProfileBundles(terminalId, p)
+        if (r.ok) { logStep('profile 依赖已重装（与主包版本匹配）'); return true }
+        logStep(`重装失败：${r.message}`); return false
       }
-      pushTerminalLog(terminalId, 'warn', `还原救援点失败：${r.message}`)
-      return false
+      if ((issue.type === 'missing-bundle' || issue.type === 'plugin-failed' || issue.type === 'duplicate-plugin') && issue.plugin) {
+        const r = rescue.excludePlugin(p.profileDir, issue.plugin)
+        if (r.ok) { logStep(`已排除插件「${issue.plugin}」（保留其它插件）`); return true }
+        logStep(`排除插件「${issue.plugin}」失败：${r.message}`); return false
+      }
+      // 其它类型（cli-arg/tool-missing/未知）：重启本身即修复，本级视为完成
+      return true
     }
-    if (issue.type === 'bundle-mismatch') {
-      // 依赖层面错配：重装 profile 官方 bundle（force 同步到与主包匹配的版本）
-      pushTerminalLog(terminalId, 'info', '检测到插件版本不匹配，自动重装 profile 依赖…')
-      const tcEnv = await getToolchainEnv(terminalId)
-      const updateExecute = makeToolchainExecute(tcEnv)
-      const bundles = await freshInstall.installProfileBundles({
-        nodeExe: findNodeExe(),
-        profileDir: p.profileDir,
-        toolsDir: path.join(p.home, '.tools'),
-        onProgress: (stage, message) => pushTerminalLog(terminalId, 'info', `[${stage}] ${message}`),
-        execute: updateExecute,
-        force: true,
-      })
-      if (bundles.ok) { pushTerminalLog(terminalId, 'info', 'profile 依赖已重装（与主包版本匹配）'); return true }
-      pushTerminalLog(terminalId, 'warn', `重装 profile 依赖失败：${bundles.message}`)
-      return false
-    }
-    if ((issue.type === 'missing-bundle' || issue.type === 'plugin-failed' || issue.type === 'duplicate-plugin') && issue.plugin) {
-      // 插件缺失/加载失败/重复注册：排除该插件（保留其它插件与 node_modules）
-      const r = rescue.excludePlugin(p.profileDir, issue.plugin)
-      if (r.ok) {
-        pushTerminalLog(terminalId, 'info', `已自动排除插件「${issue.plugin}」（保留其它插件）`)
-        return true
+    // L2：完整恢复 = 还原救援点（若有）+ 强制重装官方依赖
+    if (level === 2) {
+      let restored = false
+      if (rescue.rescueStatus(rescueDir).exists) {
+        const r = rescue.restoreRescueSnapshot(p.profileDir, rescueDir)
+        restored = r.ok
+        logStep(restored ? `已还原救援点配置（${(r.files || []).join('、')}）` : `还原救援点失败：${r.message}`)
+      } else {
+        logStep('无救援点，跳过还原配置')
       }
-      pushTerminalLog(terminalId, 'warn', `排除插件「${issue.plugin}」失败：${r.message}`)
-      return false
+      logStep('强制重装全部官方依赖…')
+      const r = await reinstallProfileBundles(terminalId, p)
+      if (r.ok) { logStep('官方依赖已重装'); return true }
+      logStep(`重装失败：${r.message}`); return false
+    }
+    // L3：工厂重置 = 备份现有配置 → 重建最小可用 profile → 重装依赖
+    if (level === 3) {
+      const backupDir = path.join(app.getPath('userData'), 'rescue', 'factory-backups', terminalId, String(Date.now()))
+      const r = rescue.factoryResetProfile(p.profileDir, backupDir)
+      if (!r.ok) { logStep(`工厂重置失败：${r.message}`); return false }
+      logStep(`已备份原配置到 ${backupDir}`)
+      logStep('重装官方依赖…')
+      const r2 = await reinstallProfileBundles(terminalId, p)
+      if (r2.ok) { logStep('工厂重置完成（最小可用 profile）'); return true }
+      logStep(`重装失败：${r2.message}`); return false
     }
     return false
   } catch (e) {
-    pushTerminalLog(terminalId, 'warn', `自动修复异常：${friendlyError(e)}`)
+    pushTerminalLog(terminalId, 'warn', `[自动恢复 L${level}] 异常：${friendlyError(e)}`)
     return false
   }
+}
+
+// 重装 profile 官方 bundle（force 同步到与主包匹配的版本），复用更新链路主路径
+async function reinstallProfileBundles(terminalId, p) {
+  const tcEnv = await getToolchainEnv(terminalId)
+  const updateExecute = makeToolchainExecute(tcEnv)
+  return freshInstall.installProfileBundles({
+    nodeExe: findNodeExe(),
+    profileDir: p.profileDir,
+    toolsDir: path.join(p.home, '.tools'),
+    onProgress: (stage, message) => pushTerminalLog(terminalId, 'info', `[${stage}] ${message}`),
+    execute: updateExecute,
+    force: true,
+  })
 }
 
 // 用 node 直接跑 harness 的 CLI（无需 pnpm）。
@@ -1228,7 +1250,7 @@ async function startTerminal(terminalId, startOptions = {}) {
         latest.stopping = false
         terminalSupervisor.check(terminalId)
         startTerminal(terminalId, { autoOpen: false }).then(r => {
-          if (r.ok) { const rt = terminalSupervisor.get(terminalId); rt.autoRestartCount = 0 }
+          if (r.ok) { const rt = terminalSupervisor.get(terminalId); rt.autoRestartCount = 0; rt.autoFixLevel = 0 }
         })
         return
       }
@@ -1243,41 +1265,55 @@ async function startTerminal(terminalId, startOptions = {}) {
         })
         recordActivity(terminalId, `DSH 崩溃（code ${code}）`, diagnosis.issues.map(i => i.message).join('；'))
       } catch { /* 事故记录失败不阻断生命周期 */ }
-      // 自动修复链（1.0.6）：确定性崩溃（配置损坏 / 依赖错配 / 插件冲突）盲目重启多少次都一样崩，
-      // 诊断命中已知问题 → 自动执行对症修复一次（还原救援点 / 重装依赖 / 排除插件）→ 再重启。
-      // 修复失败或修复后仍崩 → 不再盲目重启，提示用户用「救援」手动处理。
-      if (diagnosis.issues.length && !latest.autoFixDone) {
+      // 自动恢复阶梯（1.0.6）：小白玩崩后无感自动回到能用状态。
+      // 确定性崩溃（配置损坏 / 依赖错配 / 插件冲突）盲目重启多少次都一样崩，
+      // 诊断命中 → 逐级自动尝试（每级修完自动重启，成功即无感恢复）：
+      //   L1 对症修复：配置坏→还原救援点 / 依赖错配→重装依赖 / 插件冲突→排除
+      //   L2 完整恢复：还原救援点 + 强制重装全部官方依赖（配置与依赖一起回到好状态）
+      //   L3 工厂重置：备份现有配置 → 重建最小可用 profile（仅官方插件）→ 重装依赖
+      // 阶梯全部耗尽仍崩 → 停止自动重启，明确提示（此时多为环境问题，非小白可修）。
+      // 任何一级成功后自动刷新救援点并重置阶梯，下次崩溃重新从 L1 走。
+      if (diagnosis.issues.length) {
         const issue = diagnosis.issues[0]
-        latest.autoFixDone = true
-        pushTerminalLog(terminalId, 'warn', `诊断命中：${issue.message}，自动修复中…`)
-        runAutoFix(terminalId, p, issue).then(fixOk => {
+        const currentLevel = latest.autoFixLevel || 0
+        if (currentLevel >= 3) {
+          // 阶梯已耗尽仍崩：停止，交人工
+          latest.autoRestartCount = 0
+          latest.autoFixLevel = 0
+          pushTerminalLog(terminalId, 'error', '自动恢复阶梯已全部尝试（对症修复 / 完整恢复 / 工厂重置），仍无法启动。已停止自动重启，请到「救援」查看详情，或检查网络 / 磁盘空间 / 杀毒软件')
+          recordActivity(terminalId, 'DSH 自动恢复阶梯耗尽', '对症修复 / 完整恢复 / 工厂重置均未成功')
           latest.childProcess = null
           latest.pid = null
           latest.starting = false
           latest.stopping = false
-          if (fixOk) {
-            pushTerminalLog(terminalId, 'info', '自动修复完成，正在重启 DSH…')
-            startTerminal(terminalId, { autoOpen: false }).then(r => {
-              if (r.ok) { const rt = terminalSupervisor.get(terminalId); rt.autoRestartCount = 0; rt.autoFixDone = false }
-            })
-          } else {
-            pushTerminalLog(terminalId, 'error', '自动修复未成功，请到「救援」一键检测手动处理（已停止自动重启，避免无效循环）')
-            terminalSupervisor.check(terminalId)
-          }
-        })
-        return
-      }
-      if (diagnosis.issues.length && latest.autoFixDone) {
-        // 已自动修复过一次仍崩溃：确定性崩溃，停止盲目重启，交人工救援
-        latest.autoRestartCount = 0
-        latest.autoFixDone = false
-        pushTerminalLog(terminalId, 'error', '自动修复后仍崩溃，已停止自动重启，请到「救援」一键检测手动处理')
-        recordActivity(terminalId, 'DSH 自动修复后仍崩溃', '已停止自动重启，转人工救援')
-        latest.childProcess = null
-        latest.pid = null
-        latest.starting = false
-        latest.stopping = false
-        terminalSupervisor.check(terminalId)
+          terminalSupervisor.check(terminalId)
+          return
+        }
+        const tryLevel = (level) => {
+          latest.autoFixLevel = level
+          pushTerminalLog(terminalId, 'warn', `崩溃诊断：${issue.message}`)
+          pushTerminalLog(terminalId, 'info', `自动恢复中（第 ${level}/3 级：${['对症修复', '完整恢复', '工厂重置'][level - 1]}），请稍候…`)
+          runAutoFixLevel(terminalId, p, issue, level).then(fixOk => {
+            latest.childProcess = null
+            latest.pid = null
+            latest.starting = false
+            latest.stopping = false
+            if (fixOk) {
+              pushTerminalLog(terminalId, 'info', '自动恢复完成，正在重启 DSH…')
+              startTerminal(terminalId, { autoOpen: false }).then(r => {
+                if (r.ok) { const rt = terminalSupervisor.get(terminalId); rt.autoRestartCount = 0 }
+              })
+            } else if (level < 3) {
+              pushTerminalLog(terminalId, 'warn', `本级恢复未能完成，继续尝试第 ${level + 1} 级…`)
+              tryLevel(level + 1)
+            } else {
+              pushTerminalLog(terminalId, 'error', '自动恢复阶梯已全部尝试（对症修复 / 完整恢复 / 工厂重置），仍无法启动。已停止自动重启，请到「救援」查看详情，或检查网络 / 磁盘空间 / 杀毒软件')
+              recordActivity(terminalId, 'DSH 自动恢复阶梯耗尽', '对症修复 / 完整恢复 / 工厂重置均未成功')
+              terminalSupervisor.check(terminalId)
+            }
+          })
+        }
+        tryLevel(currentLevel + 1)
         return
       }
     }
@@ -1314,8 +1350,8 @@ async function startTerminal(terminalId, startOptions = {}) {
     // check 在 probeInFlight 时返回缓存状态，崩溃循环里可能误报 running——用 childProcess 存活做硬校验。
     if (status.running && status.harnessConfirmed && runtime.childProcess && runtime.childProcess.exitCode === null) {
       pushTerminalLog(terminalId, 'info', `终端已就绪：${p.webUrl}`)
-      // 成功启动 = 新的好状态：重置自动修复标记，下次崩溃重新走「诊断 → 对症修复」全流程
-      runtime.autoFixDone = false
+      // 成功启动 = 新的好状态：重置自动恢复阶梯，下次崩溃重新从 L1 走；同时自动刷新救援点
+      runtime.autoFixLevel = 0
       runtime.autoRestartCount = 0
       // DSH 成功启动 = 一个"好点"：自动更新本终端救援点（快照当前 profile，含所有好插件）。
       // 装坏插件导致启动失败时不会走到这里，救援点仍停在"装坏插件之前"的好状态。

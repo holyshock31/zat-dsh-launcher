@@ -230,6 +230,32 @@ function excludePlugin(profileDir, pluginName) {
   return { ok: true, removed: name, removedFromBundle, removedFromPatch, bundles: listBundles(profileDir) }
 }
 
+// 自动恢复阶梯 L3 工厂重置：备份现有 profile 关键配置，重建最小可用 profile（仅官方 bundle）。
+// 用于依赖/配置已烂到对症修复和完整恢复都无效时，让小白无感回到"能用"状态。
+// 返回 { ok, backupDir, files }；备份目录含被替换前的配置文件，可手动找回。
+const FACTORY_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+function factoryResetProfile(profileDir, backupDir) {
+  try {
+    if (!fs.existsSync(profileDir)) return { ok: false, message: 'profile 目录不存在' }
+    fs.mkdirSync(backupDir, { recursive: true })
+    const backed = []
+    for (const f of RESCUE_FILES) {
+      const src = path.join(profileDir, f)
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, path.join(backupDir, f))
+        backed.push(f)
+      }
+    }
+    // 重建最小可用 profile：仅官方 bundle，无任何 patch / 自定义插件
+    fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: FACTORY_BUNDLES } } }, null, 2) + '\n', 'utf8')
+    fs.writeFileSync(path.join(profileDir, 'cordis.yml'), '[]\n', 'utf8')
+    fs.writeFileSync(path.join(profileDir, 'cordis.patch.yml'), '[]\n', 'utf8')
+    return { ok: true, backupDir, files: backed, bundles: FACTORY_BUNDLES }
+  } catch (e) {
+    return { ok: false, message: `工厂重置失败：${e && e.message || e}` }
+  }
+}
+
 module.exports = {
   RESCUE_FILES,
   rescueDirFor,
@@ -242,4 +268,6 @@ module.exports = {
   listBundles,
   diagnoseCrash,
   excludePlugin,
+  factoryResetProfile,
+  FACTORY_BUNDLES,
 }
