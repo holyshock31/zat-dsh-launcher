@@ -67,15 +67,14 @@ test('downloadDshTo 走克隆并带进度；已存在则跳过', async () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('ensurePnpm 找不到时可自举（粘桩 tgz 解压）', async () => {
-  // findPnpm 在本机大概率为空；用工具目录的方式强制走自举路径
+test('ensurePnpm 缓存 exists 时直接返回（内置 pnpm 单文件）', async () => {
+  // 1.0.11：ensurePnpm 不再下载 tgz，缓存 pnpm.mjs 存在即返回；不存在则从资产内置复制。
   const dir = tmp('zat-pnpm')
-  // 预置假 pnpm.cjs 存在 → 直接返回
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, 'pnpm.cjs'), 'module.exports={}\n')
+  fs.writeFileSync(path.join(dir, 'pnpm.mjs'), '#!/usr/bin/env node\nconsole.log("fake")\n')
   const nodeExe = process.execPath
   const got = await ensurePnpm({ nodeExe, toolsDir: dir })
-  assert.equal(got, path.join(dir, 'pnpm.cjs'))
+  assert.equal(got, path.join(dir, 'pnpm.mjs'))
   fs.rmSync(dir, { recursive: true, force: true })
 })
 

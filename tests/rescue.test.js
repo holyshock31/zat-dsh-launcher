@@ -192,6 +192,20 @@ test('diagnoseCrash detects missing-module (Cannot find package) with exclude fi
   assert.equal(issues[0].fix, 'exclude-bundle', '缺依赖必须走排除插件（L1 对症修复），不能只重启')
 })
 
+// 1.0.11 回归：源码形态缺 tsx（ERR_MODULE_NOT_FOUND → Cannot find package 'tsx'）
+// 必须识别为 source-deps（安装依赖），而不是 missing-module 的"排除插件"（排除对依赖无效）。
+test('diagnoseCrash detects source-deps for tsx (源码形态缺依赖,不是插件)', () => {
+  const logs = [
+    "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'tsx' imported from E:\\dsh\\deepseek-harness",
+    "code: 'ERR_MODULE_NOT_FOUND'",
+  ]
+  const r = diagnoseCrash(logs)
+  const issues = r.issues.filter(i => i.type === 'source-deps')
+  assert.equal(issues.length, 1, `应识别出 source-deps: ${JSON.stringify(r.issues)}`)
+  assert.equal(issues[0].plugin, 'tsx')
+  assert.equal(issues[0].fix, 'install-deps', '缺 tsx 必须走"安装依赖"，绝不能"排除插件"')
+})
+
 test('excludePlugin removes only the bad bundle, keeps others and node_modules', () => {
   const dir = tmp('ex')
   try {

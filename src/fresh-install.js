@@ -129,31 +129,27 @@ async function downloadDshTo(targetDir, onProgress, execute = runWithProgress, p
 
 // 定位已有 pnpm；工具目录已自举则优先复用（缓存），否则找系统 pnpm；都没有时从 npm 镜像自举
 async function ensurePnpm({ nodeExe, toolsDir, onProgress, execute = run }) {
-  const version = '11.7.0'
   const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
-  const pnpmCjs = path.join(dir, 'pnpm.cjs')
-  if (fs.existsSync(pnpmCjs)) { if (onProgress) onProgress('依赖', `使用自举缓存 pnpm：${pnpmCjs}`); return pnpmCjs }
+  const cached = path.join(dir, 'pnpm.mjs')
+  if (fs.existsSync(cached)) return cached
   const existing = findPnpm()
-  if (existing) { if (onProgress) onProgress('依赖', `使用已安装 pnpm：${existing}`); return existing }
+  if (existing) return existing
+  // 内置 pnpm（assets/pnpm.cjs = 官方 dist/pnpm.mjs 单文件）：直接复制，零下载零安装。
+  // asarUnpack 后 Electron 会把 asar 路径透明映射到 resources/app.asar.unpacked 物理文件，
+  // 但显式探测物理路径更稳（打包机/便携版路径不同）。复制失败 = 安装包异常，如实抛出。
   fs.mkdirSync(dir, { recursive: true })
-  let lastUrl = ''
-  for (let i = 0; i < PNPM_MIRRORS.length; i++) {
-    const url = PNPM_MIRRORS[i].replace('{version}', version)
-    if (onProgress) onProgress('依赖', `下载 pnpm@${version}（${i + 1}/${PNPM_MIRRORS.length}）…`)
-    lastUrl = url
-    const ok = await downloadPnpmTgz(url, dir, version, onProgress)
-    if (ok && fs.existsSync(pnpmCjs)) return pnpmCjs
-  }
-  if (onProgress) onProgress('依赖', `pnpm 自举失败：${lastUrl}`)
-  throw new Error('无法自举 pnpm（npm 源均不可用）')
+  const src = path.join(__dirname, '..', 'assets', 'pnpm.cjs')
+  fs.copyFileSync(src, cached)
+  return cached
 }
 
 function findPnpm() {
-  // 只认 .cjs / .exe：Node 24 的 execFile/spawn 对 .cmd 在无 shell 下直接 EINVAL，
+  // 只认 .cjs / .mjs / .exe：Node 24 的 execFile/spawn 对 .cmd 在无 shell 下直接 EINVAL，
   // 且 zat-tools 里的 pnpm.cmd 包装可能引用已消失的 node/pnpm.cjs（残留垃圾）。
-  // .cjs 由 executablePnpm 用 node 直接执行；.exe 系统 pnpm 优先（本机 11.22.0）。
+  // .cjs/.mjs 由 executablePnpm 用 node 直接执行；.exe 系统 pnpm 优先（本机 11.22.0）。
   const candidates = [
     // 白板原则：启动器自举缓存优先（%TEMP%\zat-tools），不依赖机器预装/系统 PATH
+    path.join(os.tmpdir(), 'zat-tools', 'pnpm.mjs'),
     path.join(os.tmpdir(), 'zat-tools', 'pnpm.cjs'),
     path.join(os.tmpdir(), 'zat-tools', 'pnpm.exe'),
     process.env.PNPM_MJS,
@@ -551,7 +547,7 @@ function executablePnpm(pnpmExe, nodeExe) {
   if (!pnpmExe) return null
   const p = String(pnpmExe)
   if (/\.exe$/i.test(p)) return { file: p, args: [] }
-  if (/\.cjs$/i.test(p)) return fs.existsSync(p) ? { file: String(nodeExe || 'node'), args: [p] } : null
+  if (/\.cjs$/i.test(p) || /\.mjs$/i.test(p)) return fs.existsSync(p) ? { file: String(nodeExe || 'node'), args: [p] } : null
   if (/\.cmd$/i.test(p)) {
     // 兜底：从 .cmd 包装里解析真实 pnpm.cjs（内容形如 "@node" "@cjs" %*）
     try {

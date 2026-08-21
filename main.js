@@ -941,7 +941,17 @@ function dshCommand(dshDir) {
   if (fs.existsSync(npmPkgCli)) return { nodeExe, cli: npmPkgCli, built: true }
   const builtCli = path.join(dshDir, 'apps', 'cli', 'lib', 'bin.js')
   if (fs.existsSync(builtCli)) return { nodeExe, cli: builtCli, built: true }
-  return { nodeExe, cli: path.join(dshDir, 'apps', 'cli', 'src', 'bin.ts'), built: false }
+  // 源码模式（apps/cli/src/bin.ts + tsx）：需要 tsx 才能跑。检测依赖缺失：
+  // 克隆源码后未 pnpm install 会报 "Cannot find package 'tsx'"（用户反馈）。
+  const srcCli = path.join(dshDir, 'apps', 'cli', 'src', 'bin.ts')
+  let depsMissing = false
+  if (fs.existsSync(srcCli)) {
+    const hasTsx = fs.existsSync(path.join(dshDir, 'node_modules', 'tsx')) ||
+      fs.existsSync(path.join(dshDir, 'node_modules', '.pnpm', 'node_modules', 'tsx')) ||
+      fs.existsSync(path.join(dshDir, 'node_modules', '.bin', 'tsx.cmd'))
+    depsMissing = !hasTsx
+  }
+  return { nodeExe, cli: srcCli, built: false, depsMissing }
 }
 
 function spawnDshArgs(args, dshDir, envObj, toolchainEnv) {
@@ -1191,6 +1201,38 @@ async function startTerminal(terminalId, startOptions = {}) {
   if (!noOpen) pushTerminalLog(terminalId, 'info', '当前 DSH 版本不支持 --no-open（已自动省略；浏览器由 DSH 或手动打开）')
   const webArgs = ['web', '--port', String(p.port)]
   if (noOpen) webArgs.splice(1, 0, '--no-open')
+  // ★ 源码形态依赖自动检查（1.0.11）：克隆源码未 pnpm install 时缺 tsx → 启动即崩
+  //   （"Cannot find package 'tsx'"，用户朋友报错）。启动前检测，缺依赖自动装，绝不裸启动。
+  const cmdInfo = dshCommand(p.dshDir)
+  if (!cmdInfo.built && cmdInfo.depsMissing) {
+    pushTerminalLog(terminalId, 'warn', '检测到源码形态但依赖未安装（缺 tsx），自动安装依赖…')
+    try {
+      const fi = freshInstall
+      const pnpmExe = fi.executablePnpm(toolchainEnv && toolchainEnv.pnpmExe || fi.findPnpm(), findNodeExe()) || null
+      if (pnpmExe) {
+        const setExec = makeToolchainExecute(toolchainEnv || {})
+        const r = await setExec('安装依赖', pnpmExe, ['install', '--registry', 'https://registry.npmmirror.com/', '--config.dangerously-allow-all-builds=true'], p.dshDir, undefined, 20 * 60 * 1000)
+        if (r.ok) {
+          pushTerminalLog(terminalId, 'info', '源码依赖已安装完成，继续启动…')
+        } else {
+          pushTerminalLog(terminalId, 'error', `源码依赖安装失败：${String(r.err || r.out || '').slice(-300)}`)
+          // 依赖没装上启动也是崩，明确报错并中止
+          runtime.starting = false
+          runtime.state = 'failed'
+          terminalSupervisor.setTransition(terminalId, { state: 'failed', starting: false })
+          return { ok: false, message: '源码形态依赖安装失败，无法启动（请检查网络后重试）' }
+        }
+      } else {
+        pushTerminalLog(terminalId, 'error', '未找到 pnpm 且自举失败，无法安装源码依赖')
+        runtime.starting = false
+        runtime.state = 'failed'
+        terminalSupervisor.setTransition(terminalId, { state: 'failed', starting: false })
+        return { ok: false, message: '未找到 pnpm，无法安装源码形态依赖' }
+      }
+    } catch (e) {
+      pushTerminalLog(terminalId, 'error', `源码依赖自动安装异常：${friendlyError(e)}`)
+    }
+  }
   const { file, args, cwd, env } = spawnDshArgs(webArgs, p.dshDir, p.terminal, toolchainEnv)
   // 根修弹窗：启动器无控制台 GUI 直接 spawn 控制台程序会让 Windows 给每个子进程开新可见窗口。
   // 用隐藏控制台启动 DSH（CREATE_NEW_CONSOLE + SW_HIDE），DSH 及其所有子进程继承同一隐藏控制台，
@@ -2535,6 +2577,34 @@ function registerIpc() {
     if (runtime.running || runtime.state === 'attached-running') await stopTerminal(id, { confirmAttached: true })
     const start = await startTerminal(id)
     return ok({}, start.ok ? '已重新同步 profile 插件并重启 DSH' : `已同步 profile 插件，但重启失败：${start.message}`)
+  })
+
+  // 源码形态缺 devDependency（如 tsx）：对 dshDir 跑 pnpm install，装完自动重启。
+  // 与 bundle reinstall（profile 级）不同，这是源码树级依赖（克隆后未安装的典型场景）。
+  ipcMain.handle('rescue:install-source-deps', async (_e, terminalId) => {
+    const id = requireTerminalId(terminalId)
+    if (!id) return { ok: false, message: '必须指定有效终端' }
+    const p = terminalPaths(id)
+    pushTerminalLog(id, 'info', '检测到源码形态依赖缺失，开始安装源码依赖（pnpm install）…')
+    auditOp(id, '安装源码依赖（tsx 等 devDependencies）')
+    const tcEnv = await getToolchainEnv(id)
+    const updateExecute = makeToolchainExecute(tcEnv)
+    const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), findNodeExe())
+    if (!pnpmExe) {
+      // pnpm 三段保障：探测失败再自举
+      try {
+        const boot = await freshInstall.ensurePnpm({ nodeExe: findNodeExe(), toolsDir: path.join(os.tmpdir(), 'zat-tools') })
+        pnpmExe = freshInstall.executablePnpm(boot, findNodeExe())
+      } catch { /* 最后仍失败则报错 */ }
+    }
+    if (!pnpmExe) return { ok: false, message: '未找到 pnpm 且自举失败，无法安装源码依赖' }
+    const r = await updateExecute('安装依赖', pnpmExe, ['install', '--registry', 'https://registry.npmmirror.com/', '--config.dangerously-allow-all-builds=true'], p.dshDir, undefined, 20 * 60 * 1000)
+    if (!r.ok) return { ok: false, message: `源码依赖安装失败：${String(r.err || r.out || '').slice(-300)}` }
+    pushTerminalLog(id, 'info', '源码依赖已安装，准备重启 DSH 生效')
+    const runtime = terminalSupervisor.get(id)
+    if (runtime.running || runtime.state === 'attached-running') await stopTerminal(id, { confirmAttached: true })
+    const start = await startTerminal(id)
+    return ok({}, start.ok ? '已安装源码依赖并重启 DSH' : `已安装源码依赖，但重启失败：${start.message}`)
   })
 
   ipcMain.handle('env:list', () => envList())

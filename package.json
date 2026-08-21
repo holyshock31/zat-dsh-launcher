@@ -27,7 +27,8 @@
     "asar": true,
     "asarUnpack": [
       "scripts/session-tail.cjs",
-      "src/session-activity.js"
+      "src/session-activity.js",
+      "assets/pnpm.cjs"
     ],
     "directories": {
       "output": "dist"

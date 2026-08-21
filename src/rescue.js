@@ -127,8 +127,18 @@ function diagnoseCrash(logLines) {
       add('bad-profile', '', text.replace(/^Error:\s*/i, '').slice(0, 160), 'restore')
       continue
     }
-    m = text.match(/Cannot find package ['"]([^'"]+)['"]/i)
-    if (m) { add('missing-module', m[1], `缺少依赖包「${m[1]}」`, 'exclude-bundle'); continue }
+    m = text.match(/Cannot find package ['"]([^'"]+)['"]/i) || text.match(/ERR_MODULE_NOT_FOUND[^"]*['"]([^'"]+)['"]/i)
+    if (m) {
+      const dep = m[1]
+      // 源码形态缺 devDependency（如 tsx）：克隆源码未 pnpm install 的典型报错。
+      // 修复 = 安装依赖（install-deps），排除插件/还原救援点都没用。
+      if (/^tsx$|tsx[/\\]esm|esbuild/i.test(dep) || /tsx[/\\]esm/i.test(text)) {
+        add('source-deps', dep, `源码形态依赖缺失（${dep}）：克隆源码后未安装依赖，需要安装源码依赖后重启`, 'install-deps')
+        continue
+      }
+      add('missing-module', dep, `缺少依赖包「${dep}」`, 'exclude-bundle')
+      continue
+    }
     // profile 插件与 DSH 版本不匹配：更新主包后 profile bundle 未同步，
     // rc.8 加载旧 bundle 时报 "Unknown file extension .css / ERR_UNKNOWN_FILE_EXTENSION"，
     // 或 bundle 引用主包不存在的模块（failed to import loader entry ... missed the module table）。

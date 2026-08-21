@@ -613,6 +613,23 @@ function renderRescueDiagnosis(result) {
         if (r.ok) { renderRescueStatus(await api.rescueStatus(id)); renderRescueDiagnosis(await api.rescueDiagnose(id)) }
       }
       actions.appendChild(btn)
+    } else if (issue.fix === 'install-deps') {
+      // 源码形态缺 devDependency（如 tsx）：安装源码依赖（pnpm install）再重启。
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'btn btn-primary btn-mini'
+      btn.textContent = '安装依赖并重启'
+      btn.onclick = async () => {
+        btn.disabled = true
+        btn.textContent = '安装中…'
+        const id = state.selectedTerminalId
+        const r = await api.rescueInstallSourceDeps(id)
+        toast(r.message, r.ok ? '' : 'error')
+        btn.disabled = false
+        btn.textContent = '安装依赖并重启'
+        if (r.ok) { renderRescueStatus(await api.rescueStatus(id)); renderRescueDiagnosis(await api.rescueDiagnose(id)) }
+      }
+      actions.appendChild(btn)
     } else if (issue.fix === 'reinstall') {
       // bundle 版本不匹配：依赖层面的崩溃（.css / loader entry / prepare 未注册），
       // 光重启修不好，必须重装 profile 依赖（force 同步到与主包匹配版本）再重启。
