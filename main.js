@@ -773,7 +773,7 @@ async function getToolchainEnv(terminalId) {
   }
   const toolchain = await freshInstall.ensureUpdateToolchain({
     nodeExe: findNodeExe(),
-    toolsDir: path.join(os.tmpdir(), 'zat-tools'),
+    toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
     onProgress: log,
   })
   toolchainEnvCache = toolchain.env
@@ -921,7 +921,7 @@ async function reinstallProfileBundles(terminalId, p) {
   return freshInstall.installProfileBundles({
     nodeExe: findNodeExe(),
     profileDir: p.profileDir,
-    toolsDir: path.join(os.tmpdir(), 'zat-tools'),
+    toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
     onProgress: (stage, message) => pushTerminalLog(terminalId, 'info', `[${stage}] ${message}`),
     execute: updateExecute,
     force: true,
@@ -961,9 +961,9 @@ function spawnDshArgs(args, dshDir, envObj, toolchainEnv) {
   const childEnv = toolchainEnv && typeof toolchainEnv === 'object' ? { ...toolchainEnv } : { ...process.env }
   childEnv.DSH_HOME = envObj.dshHome && envObj.dshHome.trim() ? envObj.dshHome.trim() : ''
   // 与插件市场共享工具：把自举的 pnpm 位置通过 PNPM_MJS 注入 DSH 环境，
-  // 市场探测到直接用启动器装好的 pnpm（不重复下载）。
+  // 市场探测到直接用启动器装好的 pnpm（不重复下载）。长路径 + .mjs（内置单文件形态）。
   try {
-    const sharedPnpm = path.join(os.tmpdir(), 'zat-tools', 'pnpm.cjs')
+    const sharedPnpm = path.join(freshInstall.normalToolsDir(), 'zat-tools', 'pnpm.mjs')
     if (fs.existsSync(sharedPnpm)) childEnv.PNPM_MJS = sharedPnpm
   } catch { /* 注入失败不影响启动 */ }
   return {
@@ -1015,7 +1015,7 @@ async function execDsh(args, opts = {}) {
     try {
       const nodeExe = findNodeExe()
       if (nodeExe) {
-        const dirs = [path.dirname(nodeExe), path.join(os.tmpdir(), 'zat-tools')]
+        const dirs = [path.dirname(nodeExe), path.join(freshInstall.normalToolsDir(), 'zat-tools')]
         toolchainEnv = { ...process.env, PATH: [...dirs, process.env.PATH || ''].filter(Boolean).join(';') }
       }
     } catch { /* 注入失败则用系统环境 */ }
@@ -1127,7 +1127,7 @@ async function startTerminal(terminalId, startOptions = {}) {
   // 与插件市场共享工具：确保 %TEMP%\zat-tools 有 pnpm.cjs（市场探测位），启动器装的市场直接复用。
   // 有全局 pnpm.cjs 就复制一份过去；没有则自举到共享目录——无论哪种，zat-tools 里始终有。
   try {
-    const sharedDir = path.join(os.tmpdir(), 'zat-tools')
+    const sharedDir = path.join(freshInstall.normalToolsDir(), 'zat-tools')
     // 清理过期 .cmd 包装残留：内容可能引用已消失的 node/pnpm.cjs，
     // 且 Node 24 无 shell 时 execFile(.cmd) 直接 EINVAL（0.6.19 一键安装失败的根因之一）。
     try { fs.rmSync(path.join(sharedDir, 'pnpm.cmd'), { force: true }) } catch { /* 忽略 */ }
@@ -1983,7 +1983,7 @@ async function installFreshTerminal(options = {}) {
     // 保证"第一个"和"第二个"安装走完全相同的共享工具链（避免 root/.tools 分支不一致）。
     const dl = await freshInstall.installOfficialPackage({
       nodeExe,
-      toolsDir: path.join(os.tmpdir(), 'zat-tools'),
+      toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
       targetDir: root,
       onProgress,
       execute: installExecute,
@@ -2027,7 +2027,7 @@ async function installFreshTerminal(options = {}) {
     const bundlesOk = await freshInstall.installProfileBundles({
       nodeExe,
       profileDir,
-      toolsDir: path.join(os.tmpdir(), 'zat-tools'),
+      toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
       onProgress,
       execute: installExecute,
     })
@@ -2200,7 +2200,7 @@ function registerIpc() {
         const up = await freshInstall.updateNpmPackage({
           nodeExe: findNodeExe(),
           targetDir: p.home,
-          toolsDir: path.join(os.tmpdir(), 'zat-tools'),
+          toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
           pnpmExe: tcEnv.pnpmExe || '',
           onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
         })
@@ -2209,7 +2209,7 @@ function registerIpc() {
         const bundles = await freshInstall.installProfileBundles({
           nodeExe: findNodeExe(),
           profileDir: p.profileDir,
-          toolsDir: path.join(os.tmpdir(), 'zat-tools'),
+          toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
           onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
           execute: updateExecute,
           force: true,
@@ -2568,7 +2568,7 @@ function registerIpc() {
     const bundles = await freshInstall.installProfileBundles({
       nodeExe: findNodeExe(),
       profileDir: p.profileDir,
-      toolsDir: path.join(os.tmpdir(), 'zat-tools'),
+      toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
       onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
       execute: updateExecute,
       force: true,
@@ -2595,7 +2595,7 @@ function registerIpc() {
     if (!pnpmExe) {
       // pnpm 三段保障：探测失败再自举
       try {
-        const boot = await freshInstall.ensurePnpm({ nodeExe: findNodeExe(), toolsDir: path.join(os.tmpdir(), 'zat-tools') })
+        const boot = await freshInstall.ensurePnpm({ nodeExe: findNodeExe(), toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools') })
         pnpmExe = freshInstall.executablePnpm(boot, findNodeExe())
       } catch { /* 最后仍失败则报错 */ }
     }

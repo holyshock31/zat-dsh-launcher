@@ -24,6 +24,15 @@ const NPM_REGISTRIES = [
 ]
 const SOURCE_TIMEOUT_MS = 3000
 
+// ★ 工具目录归一化（1.0.12 修复）：Windows 的 %TEMP% 对长用户名/含空格用户名会展开成
+// 8.3 短路径（如 C:\Users\FUTURE~1），node ESM loader 对短路径解析模块失败
+// （ERR_MODULE_NOT_FOUND: .../pnpm.mjs，用户朋友机器实测）。统一用 fs.realpathSync
+// 展开成完整长路径，所有工具（pnpm/npm/git/node）都用长路径，绝不使用短路径。
+function normalToolsDir() {
+  const t = os.tmpdir()
+  try { return fs.realpathSync(t) } catch { return t }
+}
+
 // 执行器归一化：file 可为 { file, args } 对象（executablePnpm 的返回值），展开为 file+args。
 // Node 24 无 shell 时 execFile(.cmd) 直接 EINVAL，pnpm 一律用 node <cjs> / .exe 形态。
 function normalizeExec(file, args) {
@@ -125,7 +134,10 @@ async function downloadDshTo(targetDir, onProgress, execute = runWithProgress, p
 
 // 定位已有 pnpm；工具目录已自举则优先复用（缓存），否则找系统 pnpm；都没有时从 npm 镜像自举
 async function ensurePnpm({ nodeExe, toolsDir, onProgress, execute = run }) {
-  const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+  // ★ 目录归一化（1.0.12）：无论调用方传什么（可能是 8.3 短路径），统一 realpath 长路径，
+  //   否则 node ESM 对短路径解析失败（ERR_MODULE_NOT_FOUND，用户朋友机器实测）。
+  const rawDir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
+  const dir = (() => { try { fs.mkdirSync(rawDir, { recursive: true }); return fs.realpathSync(rawDir) } catch { return normalToolsDir() + '\\zat-tools' } })()
   const cached = path.join(dir, 'pnpm.mjs')
   if (fs.existsSync(cached)) return cached
   const existing = findPnpm()
@@ -133,7 +145,6 @@ async function ensurePnpm({ nodeExe, toolsDir, onProgress, execute = run }) {
   // 内置 pnpm（assets/pnpm.cjs = 官方 dist/pnpm.mjs 单文件）：直接复制，零下载零安装。
   // asarUnpack 后 Electron 会把 asar 路径透明映射到 resources/app.asar.unpacked 物理文件，
   // 但显式探测物理路径更稳（打包机/便携版路径不同）。复制失败 = 安装包异常，如实抛出。
-  fs.mkdirSync(dir, { recursive: true })
   const src = path.join(__dirname, '..', 'assets', 'pnpm.cjs')
   fs.copyFileSync(src, cached)
   return cached
@@ -143,11 +154,12 @@ function findPnpm() {
   // 只认 .cjs / .mjs / .exe：Node 24 的 execFile/spawn 对 .cmd 在无 shell 下直接 EINVAL，
   // 且 zat-tools 里的 pnpm.cmd 包装可能引用已消失的 node/pnpm.cjs（残留垃圾）。
   // .cjs/.mjs 由 executablePnpm 用 node 直接执行；.exe 系统 pnpm 优先（本机 11.22.0）。
+  const toolDir = path.join(normalToolsDir(), 'zat-tools') // 长路径（8.3 短路径导致 ESM 解析失败）
   const candidates = [
     // 白板原则：启动器自举缓存优先（%TEMP%\zat-tools），不依赖机器预装/系统 PATH
-    path.join(os.tmpdir(), 'zat-tools', 'pnpm.mjs'),
-    path.join(os.tmpdir(), 'zat-tools', 'pnpm.cjs'),
-    path.join(os.tmpdir(), 'zat-tools', 'pnpm.exe'),
+    path.join(toolDir, 'pnpm.mjs'),
+    path.join(toolDir, 'pnpm.cjs'),
+    path.join(toolDir, 'pnpm.exe'),
     process.env.PNPM_MJS,
     path.join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.exe'),
     path.join(process.env.LOCALAPPDATA || '', 'pnpm', 'pnpm.cjs'),
@@ -302,7 +314,7 @@ async function pickRegistry(nodeExe, execute = run) {
 // 用 11.x：npm 10.9.2 的 arborist 解析 @deepseek-ai/dsh 依赖树会崩溃（Link.matches null，npm 已知 bug）。
 async function ensureNpmCli({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
   const version = '11.3.0'
-  const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+  const dir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
   // npm-cli.js 保留在解压目录内（依赖同包 lib），先探测已解压的（两种命名都认）
   for (const sub of [`package-${version}`, 'package']) {
     const candidate = path.join(dir, sub, 'package', 'bin', 'npm-cli.js')
@@ -326,7 +338,7 @@ async function ensureNpmCli({ nodeExe, toolsDir, onProgress, execute = runWithPr
 // 返回 npm.cmd 路径；失败返回 ''（调用方决定是否降级）。
 async function ensureNpmCommand({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
   try {
-    const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+    const dir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
     const npmCmd = path.join(dir, 'npm.cmd')
     if (fs.existsSync(npmCmd)) return npmCmd
     const cli = await ensureNpmCli({ nodeExe, toolsDir: dir, onProgress, execute })
@@ -343,8 +355,11 @@ async function ensureNpmCommand({ nodeExe, toolsDir, onProgress, execute = runWi
 // 返回 { pnpmExe, env }：pnpmExe 可直接执行；env.PATH 已注入 node、pnpm、npm、git 所在目录，
 // 保证 DSH build 脚本里的 `node`/`pnpm`/`npm` 命令和更新/插件安装的 `git` 命令都能找到。
 async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
-  const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+  // ★ 目录归一化（1.0.12）：toolsDir 可能是 8.3 短路径，realpath 展开成长路径
+  //   （ESM 对短路径解析模块失败，用户朋友机器实测 ERR_MODULE_NOT_FOUND）。
+  let dir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
   fs.mkdirSync(dir, { recursive: true })
+  try { dir = fs.realpathSync(dir) } catch { /* 保持原样 */ }
   const extraDirs = []
   // 1) node：传入或用自举缓存
   let node = String(nodeExe || findCachedNode(dir) || '').trim()
@@ -413,7 +428,7 @@ function findSystemGit() {
 // 自举 PortableGit：下载 .7z.exe 自解压包并静默解压（-y -gm2 -o"<dir>"），然后清理自解压壳。
 async function ensureGit({ toolsDir, onProgress, execute = run }) {
   try {
-    const dir = toolsDir || path.join(os.tmpdir(), 'zat-tools')
+    const dir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
     const gitDir = path.join(dir, 'git')
     const gitExe = path.join(gitDir, 'cmd', 'git.exe')
     if (fs.existsSync(gitExe)) return gitExe
@@ -461,7 +476,7 @@ async function ensureNodeExe({ nodeExe, toolsDir, onProgress, execute = runWithP
     // 无论 node 来源（PATH/系统/缓存），都确保共享副本存在（%TEMP%\zat-tools\node.exe），
     // 插件市场按 0.6.4 约定探测该位置，任何电脑上都要对得上。
     try {
-      const sharedDir = path.join(os.tmpdir(), 'zat-tools')
+      const sharedDir = path.join(normalToolsDir(), 'zat-tools')
       fs.mkdirSync(sharedDir, { recursive: true })
       const sharedNode = path.join(sharedDir, 'node.exe')
       if (!fs.existsSync(sharedNode)) {
@@ -481,7 +496,7 @@ async function ensureNodeExe({ nodeExe, toolsDir, onProgress, execute = runWithP
   if (cached) {
     // 缓存命中也要同步共享副本（%TEMP%\zat-tools\node.exe）——系统清理 TEMP 后市场探测位会缺失
     try {
-      const sharedDir = path.join(os.tmpdir(), 'zat-tools')
+      const sharedDir = path.join(normalToolsDir(), 'zat-tools')
       fs.mkdirSync(sharedDir, { recursive: true })
       const sharedNode = path.join(sharedDir, 'node.exe')
       if (!fs.existsSync(sharedNode)) {
@@ -510,7 +525,7 @@ async function ensureNodeExe({ nodeExe, toolsDir, onProgress, execute = runWithP
           // 与插件市场共享：把 node.exe 同步到 %TEMP%\zat-tools（市场探测位），双方不重复下载。
           // 硬链接优先（同盘省空间），失败退复制；已存在则跳过。
           try {
-            const sharedDir = path.join(os.tmpdir(), 'zat-tools')
+            const sharedDir = path.join(normalToolsDir(), 'zat-tools')
             fs.mkdirSync(sharedDir, { recursive: true })
             const sharedNode = path.join(sharedDir, 'node.exe')
             if (!fs.existsSync(sharedNode)) {
@@ -560,7 +575,7 @@ function executablePnpm(pnpmExe, nodeExe) {
 // 启动目标进程，给它一个【隐藏】控制台；其子进程继承同一隐藏控制台，从此不再弹窗。
 // 与官方终端启动等效，DSH 代码一行不改；每次启动器启动时自动生效，更新覆盖也不怕。
 // ---------------------------------------------------------------------------
-const CONSOLE_HOST_DLL = () => path.join(os.tmpdir(), 'zat-tools', 'dsh-console-host.dll')
+const CONSOLE_HOST_DLL = () => path.join(normalToolsDir(), 'zat-tools', 'dsh-console-host.dll')
 
 const CONSOLE_HOST_CSHARP = [
   'using System;',
@@ -627,7 +642,7 @@ async function spawnWithHiddenConsole(program, args, options = {}) {
     try {
       // pid 经文件回传（不写 stdout）：目标进程继承的 stdout 管道完全留给目标进程，
       // 避免 PowerShell 的 pid 行与目标进程输出竞争同一管道导致解析失败。
-      const pidFile = path.join(os.tmpdir(), `zat-console-pid-${process.pid}-${Date.now()}.txt`)
+      const pidFile = path.join(normalToolsDir(), `zat-console-pid-${process.pid}-${Date.now()}.txt`)
       // env 注入：C# CreateProcess 的 lpEnvironment 是 IntPtr.Zero（继承 PS 环境），
       // 调用方传入的 env（DSH_HOME/PNPM_MJS/工具链 PATH）必须显式设置进 PS 进程环境，
       // 否则目标进程拿不到 → D:\2 这类 npm 形态终端会落回默认 ~/.dsh home（串 home 的根因）。
@@ -741,7 +756,7 @@ async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress
   if (!pnpmExe) {
     // pnpm 不可用时自举一次（与主包安装一致），绝不回退 npm（依赖树性能崩塌）
     try {
-      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(os.tmpdir(), 'zat-tools'), onProgress })
+      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(normalToolsDir(), 'zat-tools'), onProgress })
       pnpmExe = executablePnpm(boot, nodeExe)
     } catch { pnpmExe = '' }
   }
@@ -899,7 +914,7 @@ async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress
   if (!pnpmExeResolved) {
     try {
       if (onProgress) onProgress('下载', '未找到 pnpm，正在自举（微秒级，仅首次）…')
-      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(os.tmpdir(), 'zat-tools'), onProgress })
+      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(normalToolsDir(), 'zat-tools'), onProgress })
       pnpmExeResolved = executablePnpm(boot, nodeExe)
     } catch { pnpmExeResolved = '' }
   }
@@ -938,7 +953,7 @@ async function updateNpmPackage({ nodeExe, targetDir, toolsDir, onProgress, exec
   if (!pnpm) {
     try {
       if (onProgress) onProgress('更新', '未找到 pnpm，正在自举…')
-      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(os.tmpdir(), 'zat-tools'), onProgress })
+      const boot = await ensurePnpm({ nodeExe, toolsDir: toolsDir || path.join(normalToolsDir(), 'zat-tools'), onProgress })
       pnpm = executablePnpm(boot, nodeExe)
     } catch { pnpm = '' }
   }
@@ -979,7 +994,7 @@ module.exports = {
   downloadDshTo, ensurePnpm, findPnpm, installDependencies, pickRegistry,
   ensureNpmCli, installOfficialPackage, updateNpmPackage, installProfileBundles,
   ensureNodeExe, findCachedNode, patchDshSubprocessNoWindow, ensureNpmCommand, ensureUpdateToolchain,
-  findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole,
+  findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole, normalToolsDir,
   resolveLatestDshVersion,
   DSH_ORIGIN, DSH_NPM_PACKAGE, DSH_NPM_TAG, NPM_REGISTRIES, SOURCE_TIMEOUT_MS,
 }
