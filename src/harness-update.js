@@ -294,9 +294,12 @@ async function checkUpdate(dshDir, execute = run, probeLatest = null) {
   }
 }
 
-// 清理 tsc 增量缓存（*.tsbuildinfo）：更新前后强制全量编译。
-// 旧缓存会让 tsc -b 误判「已是最新」跳过部分包 → 更新后产物缺失/新旧混合
-// → 启动时 Cannot find module .../lib/index.js（曾导致更新后 DSH 起不来）。
+// tsc 增量缓存处理策略（1.0.7 提速）：
+// 旧逻辑更新前全删 *.tsbuildinfo 强制全量编译（源码树 50 包全量编译要 2~5 分钟），
+// 因为 0.6.x 时代曾发生「旧缓存让 tsc -b 误判已最新 → 产物缺失 → 启动起不来」。
+// 新策略：保留缓存走增量编译（tsc -b 只重编译变化的包，通常几十秒），
+// 编译后用 verifyKeyArtifacts 验证关键产物 + 启动前 DSH 自身校验，产物缺失才清缓存全量重编。
+// 这样大多数更新是增量秒级，极端情况才回退全量，对所有用户都快且稳。
 function clearTsBuildInfo(dshDir) {
   try {
     const walk = (dir) => {
@@ -423,10 +426,18 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
   // build 必须用 npm 触发（新版 DSH build.ts 用 npm_execpath + `node <path> run ...`，
   // pnpm 的 npm_execpath 是 pnpm.exe 会被 node 当 JS 加载报错；npm 的是 npm-cli.js 纯 JS）。
   // runBuild 内部多级自适应：npm run build → 分步 build:lib/build:web → pnpm run build 兜底。
-  // build 前清 tsc 增量缓存：旧 tsbuildinfo 会让部分包跳过编译，产物缺失/新旧混合。
-  clearTsBuildInfo(dshDir)
-  const build = install.ok ? await runBuild(dshDir, execute, execute && execute.env || process.env, pnpm, step) : { ok: false, err: '依赖安装失败' }
-  const artifact = install.ok && build.ok ? verifyKeyArtifacts(dshDir) : { ok: true }
+  // 1.0.7 提速：先保留 tsc 增量缓存编译（只重编译变化的包，通常几十秒）；
+  // 产物验证不通过才清缓存强制全量重编（旧逻辑每次全量 2~5 分钟）。
+  step('开始编译（增量模式：仅重编译变化的包）…')
+  let build = install.ok ? await runBuild(dshDir, execute, execute && execute.env || process.env, pnpm, step) : { ok: false, err: '依赖安装失败' }
+  let artifact = install.ok && build.ok ? verifyKeyArtifacts(dshDir) : { ok: true }
+  if (install.ok && (!build.ok || artifact.ok === false)) {
+    // 增量编译失败/产物缺失：清缓存强制全量编译（旧版可靠路径）
+    step('增量编译未满足要求，切换全量编译（清 tsc 缓存，约 2~5 分钟）…')
+    clearTsBuildInfo(dshDir)
+    build = await runBuild(dshDir, execute, execute && execute.env || process.env, pnpm, step)
+    artifact = build.ok ? verifyKeyArtifacts(dshDir) : { ok: true }
+  }
   if (!install.ok || !build.ok || !artifact.ok) {
     // 失败：完整恢复旧版本可运行状态（代码回滚 + 清缓存 + 重装依赖 + 重建旧代码产物），
     // 绝不留「新代码 + 旧产物 / 旧代码 + 新产物」的混合状态（曾导致更新后 DSH 起不来）。
