@@ -921,7 +921,7 @@ async function reinstallProfileBundles(terminalId, p) {
   return freshInstall.installProfileBundles({
     nodeExe: findNodeExe(),
     profileDir: p.profileDir,
-    toolsDir: path.join(p.home, '.tools'),
+    toolsDir: path.join(os.tmpdir(), 'zat-tools'),
     onProgress: (stage, message) => pushTerminalLog(terminalId, 'info', `[${stage}] ${message}`),
     execute: updateExecute,
     force: true,
@@ -1978,10 +1978,12 @@ async function installFreshTerminal(options = {}) {
   try {
     // ★ 主路径：下载官方预构建包（镜像优先/官方回退，自带前端 dist，即装即跑，零编译）
     // 显式传入工具链自举好的 pnpmExe：不依赖 installOfficialPackage 内部二次探测
-    // （findPnpm 可能因缓存文件名/路径差异返回空，导致误走 npm 回退 —— 1.0.9 修复）
+    // （findPnpm 可能因缓存文件名/路径差异返回空，导致误走 npm 回退 —— 1.0.9 修复）。
+    // toolsDir 统一为共享 %TEMP%\zat-tools（1.0.11）：绝不 per 终端自举工具，
+    // 保证"第一个"和"第二个"安装走完全相同的共享工具链（避免 root/.tools 分支不一致）。
     const dl = await freshInstall.installOfficialPackage({
       nodeExe,
-      toolsDir: path.join(root, '.tools'),
+      toolsDir: path.join(os.tmpdir(), 'zat-tools'),
       targetDir: root,
       onProgress,
       execute: installExecute,
@@ -2025,7 +2027,7 @@ async function installFreshTerminal(options = {}) {
     const bundlesOk = await freshInstall.installProfileBundles({
       nodeExe,
       profileDir,
-      toolsDir: path.join(root, '.tools'),
+      toolsDir: path.join(os.tmpdir(), 'zat-tools'),
       onProgress,
       execute: installExecute,
     })
@@ -2198,7 +2200,7 @@ function registerIpc() {
         const up = await freshInstall.updateNpmPackage({
           nodeExe: findNodeExe(),
           targetDir: p.home,
-          toolsDir: path.join(p.home, '.tools'),
+          toolsDir: path.join(os.tmpdir(), 'zat-tools'),
           pnpmExe: tcEnv.pnpmExe || '',
           onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
         })
@@ -2207,7 +2209,7 @@ function registerIpc() {
         const bundles = await freshInstall.installProfileBundles({
           nodeExe: findNodeExe(),
           profileDir: p.profileDir,
-          toolsDir: path.join(p.home, '.tools'),
+          toolsDir: path.join(os.tmpdir(), 'zat-tools'),
           onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
           execute: updateExecute,
           force: true,
@@ -2566,7 +2568,7 @@ function registerIpc() {
     const bundles = await freshInstall.installProfileBundles({
       nodeExe: findNodeExe(),
       profileDir: p.profileDir,
-      toolsDir: path.join(p.home, '.tools'),
+      toolsDir: path.join(os.tmpdir(), 'zat-tools'),
       onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
       execute: updateExecute,
       force: true,

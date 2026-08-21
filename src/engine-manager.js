@@ -5,8 +5,9 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
 const { updateSources } = require('./harness-update')
-const { run } = require('./fresh-install')
+const { run, runWithProgress } = require('./fresh-install')
 
 const ENGINE_ORIGIN = 'https://github.com/mishibeikejie/zat-dsh-engine.git'
 const PATCH_ROW_ID = 'plugin-market'
@@ -145,7 +146,19 @@ function patchEngineNoWindow(engineDir) {
 
 // 下载引擎源码到 targetDir（官方优先，国内镜像回退；浅克隆，带进度）。
 // force=true 时忽略"已存在跳过"（更新场景：目录里有旧版也必须重新克隆覆盖）。
+// execute 未指定时构造带自举 git PATH 的默认执行器——git 调用绝不依赖系统 PATH（1.0.11 加固）。
 async function downloadEngineTo(targetDir, onProgress, execute = run, { force = false } = {}) {
+  // 默认执行器：把已自举的 git 目录（%TEMP%\zat-tools\git\cmd）前置到 PATH，
+  // 保证无系统 git 的机器也能克隆（白板原则；调用方传入工具链 execute 时直接使用）。
+  if (execute === run) {
+    const gitDir = path.join(os.tmpdir(), 'zat-tools', 'git', 'cmd')
+    if (fs.existsSync(gitDir)) {
+      const baseEnv = { ...process.env, PATH: `${gitDir};${process.env.PATH || ''}` }
+      const wrapped = (desc, file, args, cwd, onProg, timeout) => runWithProgress(desc, file, args, cwd, onProg, timeout, baseEnv)
+      wrapped.env = baseEnv
+      execute = wrapped
+    }
+  }
   if (!force && fs.existsSync(targetDir) && readMaybe(path.join(targetDir, 'package.json')).includes('zat-dsh-engine')) {
     if (onProgress) onProgress('引擎', `引擎源码已存在（${targetDir}），跳过下载`)
     return { ok: true, dir: targetDir, skipped: true }

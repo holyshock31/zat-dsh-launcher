@@ -22,10 +22,6 @@ const NPM_REGISTRIES = [
   'https://registry.npmjs.org/',
   'https://registry.npmmirror.com/',
 ]
-const PNPM_MIRRORS = [
-  'https://registry.npmjs.org/pnpm/-/pnpm-{version}.tgz',
-  'https://registry.npmmirror.com/pnpm/-/pnpm-{version}.tgz',
-]
 const SOURCE_TIMEOUT_MS = 3000
 
 // 执行器归一化：file 可为 { file, args } 对象（executablePnpm 的返回值），展开为 file+args。
@@ -250,11 +246,6 @@ async function downloadCliTgz(url, dir, version, onProgress) {
     fs.rmSync(tgz, { force: true })
     return entry
   } catch { return '' }
-}
-
-async function downloadPnpmTgz(url, dir, version, onProgress) {
-  const entry = await downloadCliTgz(url, dir, version, onProgress)
-  return !!(entry && entry.endsWith('pnpm.cjs'))
 }
 
 // 安装依赖（+可选构建）。默认只装依赖：DSH 可用 tsx 源码模式直接运行（node --import tsx/esm apps/cli/src/bin.ts），
@@ -985,7 +976,7 @@ async function updateNpmPackage({ nodeExe, targetDir, toolsDir, onProgress, exec
 
 module.exports = {
   run, runWithProgress, probeSource, reachableSource,
-  downloadDshTo, ensurePnpm, findPnpm, downloadPnpmTgz, installDependencies, pickRegistry,
+  downloadDshTo, ensurePnpm, findPnpm, installDependencies, pickRegistry,
   ensureNpmCli, installOfficialPackage, updateNpmPackage, installProfileBundles,
   ensureNodeExe, findCachedNode, patchDshSubprocessNoWindow, ensureNpmCommand, ensureUpdateToolchain,
   findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole,
