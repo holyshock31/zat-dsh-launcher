@@ -499,9 +499,16 @@ function initializeTerminalSupervisor() {
       try {
         const rescueDir = rescue.rescueDirFor(app.getPath('userData'), terminalId)
         if (!rescue.rescueStatus(rescueDir).exists) {
-          rescue.markCrashRecovered(rescueDir)
-          const rescuePoint = rescue.createRescueSnapshot(terminalPaths(terminalId).profileDir, rescueDir)
-          if (rescuePoint.ok) pushTerminalLog(terminalId, 'info', '已自动创建救援点（当前为正常状态）')
+          // ★ 1.0.13：快照前校验——profile 的官方 bundle 若未实装(坏状态),把坏状态当"好点"
+          //   会让还原救援点救不回;此时跳过快照,留待正常状态再备份。
+          const pPaths = terminalPaths(terminalId)
+          const baseOk = fs.existsSync(path.join(pPaths.profileDir, 'node_modules', '@deepseek-ai', 'dsh-base'))
+          const webOk = fs.existsSync(path.join(pPaths.profileDir, 'node_modules', '@deepseek-ai', 'dsh-web-app'))
+          if (baseOk && webOk) {
+            rescue.markCrashRecovered(rescueDir)
+            const rescuePoint = rescue.createRescueSnapshot(pPaths.profileDir, rescueDir)
+            if (rescuePoint.ok) pushTerminalLog(terminalId, 'info', '已自动创建救援点（当前为正常状态）')
+          }
         }
       } catch { /* 快照失败不阻断监控 */ }
     }
@@ -658,10 +665,13 @@ function pollSessionActivity() {
   freshInstall.spawnWithHiddenConsole(nodeExe, workerArgs, { stdio: ['ignore', 'pipe', 'pipe'] }).then(({ child }) => {
     let out = ''
     let done = false
+    let workerChild = null
     const finish = () => {
       if (done) return
       done = true
       sessionTailPolling = false
+      // ★ 1.0.13：worker 卡死残留——超时退出后强杀进程,避免堆积(每轮泄漏一个)
+      try { if (workerChild && workerChild.kill) workerChild.kill() } catch { /* 忽略 */ }
       try {
         const data = JSON.parse(out || '{}')
         for (let i = 0; i < running.length; i++) {
@@ -715,6 +725,7 @@ function pollSessionActivity() {
     }
     child.stdout.on('data', d => { out += d.toString() })
     child.stderr.on('data', () => { /* 忽略 */ })
+    workerChild = child
     child.on('error', finish)
     child.on('exit', finish)
     child.on('close', finish)

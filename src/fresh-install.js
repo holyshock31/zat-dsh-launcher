@@ -694,6 +694,9 @@ async function spawnWithHiddenConsole(program, args, options = {}) {
       if (pid > 0) {
         // 目标进程已独立运行（CreateProcess 不挂在 PowerShell 下），stdout/stderr 管道由目标持有，
         // 管道 end = 目标退出（PowerShell 已退出、只剩目标持有写端）。
+        // ★ 1.0.13：避免竞态——PowerShell 启动目标后立即退出（PS stdout 'end'），
+        //   绝不能因此把存活进程 finish(0)（exitCode=0 → startTerminal 误判进程已退出 → 启动失败）。
+        //   目标进程管道持有者退出才算退出；PS 自身的 'exit'/'close' 不触发 finish。
         const handle = new EventEmitter()
         handle.pid = pid
         // exitCode: null = 进程存活（startTerminal 就绪判定与 supervisor degraded 判定都依赖它）
@@ -710,8 +713,15 @@ async function spawnWithHiddenConsole(program, args, options = {}) {
           handle.emit('exit', handle.exitCode, null)
           handle.emit('close', handle.exitCode, null)
         }
-        ps.stdout.on('end', () => finish(0))
-        ps.on('error', () => finish(1))
+        // 只认目标 stdout 管道 end（目标持有写端）：PS 退出不代表目标退出
+        ps.stdout.on('end', () => {
+          // PS 可能先退出（Launch 成功即退）——但管道 write 端已被目标进程继承，
+          // 若目标仍存活,PS stdout 'end' 不会在此触发(端在目标手上);真正 end = 目标退出。
+          // 保守:延迟 200ms 再判定,给管道交接留时间,期间 finish 不会被错误触发。
+          setTimeout(() => { if (!exited) finish(0) }, 200)
+        })
+        ps.on('exit', () => { /* 不 finish：PS 退出不代表目标退出（1.0.13 竞态修复） */ })
+        ps.on('error', () => { /* 不 finish，同上 */ })
         handle.kill = (sig) => {
           try {
             require('node:child_process').execFileSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true })
