@@ -2144,6 +2144,7 @@ function registerIpc() {
     const result = await installHarnessUpdate(p.dshDir, snapshotDir, updateExecute, {
       pnpmExe,
       probeLatest: harnessUpdate.npmLatestProbe(findNodeExe()),
+      onStep: (msg) => pushTerminalLog(id, 'info', `[更新] ${msg}`),
       npmUpdater: async () => {
         // 更新主包（npm 包形态），成功后再强制同步 profile bundle 到 @next：
         // 主包升级后 bundle 不跟上的话，rc 错配导致启动崩溃（Unknown file extension .css）。
@@ -2167,6 +2168,20 @@ function registerIpc() {
       },
     })
     pushTerminalLog(id, result.ok ? 'info' : 'error', result.message)
+    // 更新成功 → 自动重启生效：用户点完「安装更新」就完事，不用再手动启动。
+    // 无论更新前是否在运行，新版本都要重启进程才加载（旧进程仍是旧代码）。
+    if (result.ok) {
+      pushTerminalLog(id, 'info', '更新完成，自动重启终端使新版本生效…')
+      const stopped = await stopTerminal(id, { confirmAttached: true, silent: true })
+      if (!stopped.ok && stopped.message) pushTerminalLog(id, 'warn', `停止旧进程：${stopped.message}`)
+      const start = await startTerminal(id, { autoOpen: false })
+      if (start.ok) {
+        pushTerminalLog(id, 'info', `已自动重启：${start.message}`)
+        return { ...result, ok: true, message: `${result.message}；已自动重启生效` }
+      }
+      pushTerminalLog(id, 'error', `更新完成但自动重启失败：${start.message}`)
+      return { ...result, ok: false, message: `更新完成，但自动重启失败：${start.message}` }
+    }
     return result
   })
 

@@ -78,9 +78,10 @@ function findNpmCli(env) {
 //    脚本；真实 web UI 由 profile bundles @deepseek-ai/dsh-web-app 提供，不依赖此构建）——
 //    失败且错误为「No projects matched the filters」时智能跳过，其余失败照常报错
 //  - pnpm run build 作为最后兜底（兼容未来上游修正后 pnpm 也可用的场景）
-async function runBuild(dshDir, execute, env, pnpmExe) {
+async function runBuild(dshDir, execute, env, pnpmExe, onStep) {
   const npmCli = findNpmCli(env)
   const nodeFile = process.env.npm_node_execpath || 'node'
+  const step = (msg) => { try { if (onStep) onStep(msg) } catch { /* 日志失败不阻断 */ } }
   // build:web 的 script 是 `pnpm --filter ... run build`，npm 执行 script 时必须在 PATH 里
   // 能找到 pnpm——把 pnpm 所在目录显式前置进构建环境（工具链 PATH 缺 pnpm 时也能构建）。
   const extraPath = []
@@ -97,20 +98,24 @@ async function runBuild(dshDir, execute, env, pnpmExe) {
     : execute('npm', ['run', script], dshDir, 25 * 60 * 1000, buildEnv)
 
   // 1) 整体 build
+  step('构建中：npm run build（全量编译，约需 2~5 分钟，请耐心等待）')
   let r = await runNpm('build')
   if (r.ok) return { ok: true, used: 'npm run build' }
 
   // 2) 分步：build:lib（核心，必须成功）
+  step('整体构建未通过，分步重试：build:lib')
   r = await runNpm('build:lib')
   if (!r.ok) {
     const libErr = String(r.err || r.out || '').slice(-1500)
     // 3) 兜底：pnpm run build
+    step('build:lib 未通过，最后兜底：pnpm run build')
     const p = await execute(pnpmExe || null, ['run', 'build'], dshDir, 25 * 60 * 1000, buildEnv)
     if (p.ok) return { ok: true, used: 'pnpm run build（兜底）' }
     return { ok: false, err: `build:lib 失败：${libErr}；pnpm 兜底也失败：${String(p.err || p.out || '').slice(-800)}` }
   }
 
   // 4) build:web：识别上游失效脚本（filter 包不存在），智能跳过
+  step('build:lib 完成，继续 build:web')
   r = await runNpm('build:web')
   if (r.ok) return { ok: true, used: 'npm run build:lib + build:web' }
   const webErr = String(r.err || r.out || '')
@@ -379,10 +384,11 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
     const updated = await options.npmUpdater()
     if (!updated.ok) return { ...info, ok: false, message: updated.message }
     const next = await localInfo(dshDir, execute)
-    return { ...next, updateAvailable: false, message: `Harness 已更新到 ${updated.version || next.version}，等待用户启动终端` }
+    return { ...next, updateAvailable: false, message: `Harness 已更新到 ${updated.version || next.version}` }
   }
   if (!info.updateAvailable) return { ...info, message: '当前已是最新版本' }
   const oldHead = (await execute('git', ['rev-parse', 'HEAD'], dshDir)).out
+  const step = options.onStep || (() => {})
   fs.mkdirSync(snapshotDir, { recursive: true })
   fs.writeFileSync(path.join(snapshotDir, 'update.json'), `${JSON.stringify({ createdAt: Date.now(), dshDir, oldHead, target: info.remoteRef, targetCommit: info.remoteCommit }, null, 2)}\n`, 'utf8')
   // 有本地修改：ff-only merge 需要干净工作区，先 stash 清空（含未跟踪文件）。
@@ -396,6 +402,7 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
   }
   const merge = await execute('git', ['merge', '--ff-only', info.remoteRef], dshDir, 120000)
   if (!merge.ok) return { ...info, ok: false, message: `更新快进失败：${merge.err || merge.out}` }
+  step(`代码已更新（${info.behindCount} 个新提交），正在安装依赖…`)
   const pnpm = options.pnpmExe || null
   // 依赖安装四连：frozen 镜像 → frozen 官方 → 非 frozen 镜像 → 非 frozen 官方。
   // 国内网络直连 npmjs 常断（UND_ERR_DESTROYED），镜像优先命中率最高；
@@ -411,13 +418,14 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
   for (const args of installAttempts) {
     install = await execute(pnpm, args, dshDir, 15 * 60 * 1000)
     if (install.ok) break
+    step(`依赖安装未通过（${args[0]}），切换下一策略…`)
   }
   // build 必须用 npm 触发（新版 DSH build.ts 用 npm_execpath + `node <path> run ...`，
   // pnpm 的 npm_execpath 是 pnpm.exe 会被 node 当 JS 加载报错；npm 的是 npm-cli.js 纯 JS）。
   // runBuild 内部多级自适应：npm run build → 分步 build:lib/build:web → pnpm run build 兜底。
   // build 前清 tsc 增量缓存：旧 tsbuildinfo 会让部分包跳过编译，产物缺失/新旧混合。
   clearTsBuildInfo(dshDir)
-  const build = install.ok ? await runBuild(dshDir, execute, execute && execute.env || process.env, pnpm) : { ok: false, err: '依赖安装失败' }
+  const build = install.ok ? await runBuild(dshDir, execute, execute && execute.env || process.env, pnpm, step) : { ok: false, err: '依赖安装失败' }
   const artifact = install.ok && build.ok ? verifyKeyArtifacts(dshDir) : { ok: true }
   if (!install.ok || !build.ok || !artifact.ok) {
     // 失败：完整恢复旧版本可运行状态（代码回滚 + 清缓存 + 重装依赖 + 重建旧代码产物），
@@ -430,7 +438,7 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
       : `已回滚代码，但旧版本恢复失败：${restored.err}`
     return { ...info, ok: false, rolledBack: true, message: `更新验证失败：${String(fail).slice(-1500)}。${restoredNote}` }
   }
-  return { ...(await localInfo(dshDir, execute)), updateAvailable: false, message: 'Harness 已更新到官方版本，等待用户启动终端' }
+  return { ...(await localInfo(dshDir, execute)), updateAvailable: false, message: 'Harness 已更新到官方版本' }
 }
 
 module.exports = { run, readVersion, localInfo, updateSources, checkUpdate, installUpdate, npmLatestProbe, compareVersions, detectKind, NPM_REGISTRIES, runBuild, verifyKeyArtifacts, clearTsBuildInfo, findNpmCli }
