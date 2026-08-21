@@ -130,14 +130,36 @@ function diagnoseCrash(logLines) {
     m = text.match(/Cannot find package ['"]([^'"]+)['"]/i)
     if (m) { add('missing-module', m[1], `缺少依赖包「${m[1]}」`, 'exclude-bundle'); continue }
     // profile 插件与 DSH 版本不匹配：更新主包后 profile bundle 未同步，
-    // rc.8 加载旧 bundle 时报 "Unknown file extension .css / ERR_UNKNOWN_FILE_EXTENSION"。
+    // rc.8 加载旧 bundle 时报 "Unknown file extension .css / ERR_UNKNOWN_FILE_EXTENSION"，
+    // 或 bundle 引用主包不存在的模块（failed to import loader entry ... missed the module table）。
+    // 这类崩溃在依赖层面，救援点（仅配置文件）救不了，修复 = 重装 profile 依赖 + 重启（reinstall）。
     m = text.match(/Unknown file extension ["']?\.([a-z0-9]+)["']?/i) || text.match(/ERR_UNKNOWN_FILE_EXTENSION/i)
     if (m) {
-      add('bundle-mismatch', '', `profile 插件与 DSH 版本不匹配（加载 .${m[1] || '资源'} 失败）：更新 DSH 后 profile 依赖未同步，请重新安装 profile 依赖后重启`, 'restart')
+      add('bundle-mismatch', '', `profile 插件与 DSH 版本不匹配（加载 .${m[1] || '资源'} 失败）：更新 DSH 后 profile 依赖未同步，需要重新安装 profile 依赖后重启`, 'reinstall')
       continue
     }
     if (/failed to import loader entry/i.test(text)) {
-      add('bundle-mismatch', '', 'profile 插件加载失败（版本不匹配）：更新 DSH 后 profile 依赖未同步，请重新安装 profile 依赖后重启', 'restart')
+      add('bundle-mismatch', '', 'profile 插件加载失败（版本不匹配）：bundle 引用了主包不存在的模块，需要重新安装 profile 依赖后重启', 'reinstall')
+      continue
+    }
+    // 工具调度器未注册（#1677/#2130）：根因多为重复安装的 @deepseek-ai/* 依赖拷贝，
+    // 与 bundle 错配同类，同样需要重装 profile 依赖。
+    m = text.match(/Cannot read properties of undefined \(reading ['"]([^'"]+)['"]\)/i)
+    if (m && /prepare|ToolRuntime|scheduler/i.test(text)) {
+      add('bundle-mismatch', '', `工具调度器未注册（reading '${m[1]}'）：多为重复安装的 @deepseek-ai/* 依赖导致，需要重新安装 profile 依赖后重启`, 'reinstall')
+      continue
+    }
+    // 插件重复注册（#3263/#2889）：插件市场安装/更新插件后 `duplicate loader entry id: <id>`，
+    // 同一 loader entry 被注册两次（cordis.patch.yml 与 bundle 重复）。修复 = 排除重复注册。
+    m = text.match(/duplicate loader entry id: ([a-z0-9_-]+)/i)
+    if (m) {
+      add('duplicate-plugin', m[1], `插件「${m[1]}」重复注册（duplicate loader entry）：插件市场安装/更新后与已有注册冲突，需要移除重复注册`, 'exclude-bundle')
+      continue
+    }
+    // 工具链命令缺失（#2990）：Windows 下 spawn bash 等子进程 ENOENT，harness 未捕获整体崩溃。
+    // 启动器会自动重新自举 node/pnpm/npm/git 工具链，重启即可。
+    if (/ENOENT/i.test(text) && /spawn|bash|exec|createProcess/i.test(text)) {
+      add('tool-missing', '', '工具链命令缺失（spawn ENOENT）：启动器会自动重新自举 node/pnpm/npm/git 工具链，重新启动即可', 'restart')
       continue
     }
     // CLI 参数不兼容：如 npm 预构建包 rc.7 不认 --no-open → "unknown option '--no-open'"

@@ -526,7 +526,7 @@ function renderRescueDiagnosis(result) {
     els.rescueIssues.appendChild(n)
     return
   }
-  const typeLabel = { 'missing-bundle': '缺失插件', 'plugin-failed': '插件加载失败', 'bad-profile': 'profile 损坏', 'missing-module': '缺少依赖', 'cli-arg': '启动参数不兼容', 'cli-error': '启动命令错误' }
+  const typeLabel = { 'missing-bundle': '缺失插件', 'plugin-failed': '插件加载失败', 'bad-profile': 'profile 损坏', 'missing-module': '缺少依赖', 'cli-arg': '启动参数不兼容', 'cli-error': '启动命令错误', 'bundle-mismatch': '插件版本不匹配', 'duplicate-plugin': '插件重复注册', 'tool-missing': '工具链缺失' }
   for (const issue of issues) {
     const row = document.createElement('div')
     row.className = 'rescue-issue'
@@ -594,6 +594,24 @@ function renderRescueDiagnosis(result) {
         toast(r.message, r.ok ? '' : 'error')
         btn.disabled = false
         btn.textContent = '重新启动'
+        if (r.ok) { renderRescueStatus(await api.rescueStatus(id)); renderRescueDiagnosis(await api.rescueDiagnose(id)) }
+      }
+      actions.appendChild(btn)
+    } else if (issue.fix === 'reinstall') {
+      // bundle 版本不匹配：依赖层面的崩溃（.css / loader entry / prepare 未注册），
+      // 光重启修不好，必须重装 profile 依赖（force 同步到与主包匹配版本）再重启。
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'btn btn-primary btn-mini'
+      btn.textContent = '重装依赖并重启'
+      btn.onclick = async () => {
+        btn.disabled = true
+        btn.textContent = '重装中…'
+        const id = state.selectedTerminalId
+        const r = await api.rescueReinstallBundles(id)
+        toast(r.message, r.ok ? '' : 'error')
+        btn.disabled = false
+        btn.textContent = '重装依赖并重启'
         if (r.ok) { renderRescueStatus(await api.rescueStatus(id)); renderRescueDiagnosis(await api.rescueDiagnose(id)) }
       }
       actions.appendChild(btn)

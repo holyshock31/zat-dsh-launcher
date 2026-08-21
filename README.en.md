@@ -39,7 +39,7 @@ Manage many Harness instances from one app: each terminal has its own port, DSH_
 ```powershell
 # Requires Node.js 22+ and pnpm
 pnpm install
-pnpm test          # runs the 86 unit tests
+pnpm test          # runs the 90 unit tests
 pnpm dist          # builds the NSIS installer + win-unpacked
 ```
 
@@ -52,7 +52,7 @@ pnpm dist          # builds the NSIS installer + win-unpacked
 | One-click attach | Attach to installed or running Harness instances |
 | Hidden console | No black windows for DSH or its children |
 | Live session logs | Full conversation content + title prefixes, multiple conversations at a glance |
-| Rescue center | Crash diagnosis + one-click fix (exclude plugin / restore / restart) |
+| Rescue center | Crash diagnosis + one-click fix (exclude plugin / restore / reinstall deps / restart) |
 | Auto update | Dual-form Harness updates with automatic rollback; launcher self-update check |
 | Plugin market | Built-in zat-dsh-engine, auto-injected and updated |
 | Safe deletion | Real deletion + live progress + automatic residue cleanup; success only when clean |
@@ -74,7 +74,7 @@ src/
   toolchain-execute.js  Toolchain executor (single exit for node/pnpm/git)
 renderer/               Renderer: console / environment / rescue / wizard UI
 scripts/session-tail.cjs Session incremental reader worker (hidden console)
-tests/                  86 unit tests
+tests/                  90 unit tests
 ```
 
 ### Independence Guarantees

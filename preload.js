@@ -49,6 +49,7 @@ const api = {
   rescueRestore: (terminalId) => ipcRenderer.invoke('rescue:restore', terminalId),
   rescueDiagnose: (terminalId) => ipcRenderer.invoke('rescue:diagnose', terminalId),
   rescueExclude: (terminalId, pluginName) => ipcRenderer.invoke('rescue:exclude', terminalId, pluginName),
+  rescueReinstallBundles: (terminalId) => ipcRenderer.invoke('rescue:reinstall-bundles', terminalId),
   harnessInfo: (terminalId) => ipcRenderer.invoke('harness:info', terminalId),
   harnessCheckUpdate: (terminalId) => ipcRenderer.invoke('harness:check-update', terminalId),
   harnessInstallUpdate: (terminalId) => ipcRenderer.invoke('harness:install-update', terminalId),

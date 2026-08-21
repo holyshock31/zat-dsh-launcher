@@ -127,6 +127,60 @@ test('diagnoseCrash detects unknown CLI option (rc.7 --no-open regression)', () 
   assert.ok(cliIssues[0].message.includes('--no-open'))
 })
 
+// 1.0.6 矩阵扩展：网上搜集的 DSH 真实崩溃案例（官方 discussion #3263/#2889/#1677/#2990）。
+
+test('diagnoseCrash detects bundle-mismatch from failed to import loader entry (群友案例)', () => {
+  const logs = [
+    'Failed to load plugins',
+    'failed to import loader entry 12569d5a(dsh-session-manager): client-modules:require("@deepseek-ai/dsh-client-web-react")missed the module table - not a platform seed word,not a materialized module,and no registered package factory (a build-time externals drift,or a dynamic dependency that did not arrive)',
+  ]
+  const r = diagnoseCrash(logs)
+  const issues = r.issues.filter(i => i.type === 'bundle-mismatch')
+  assert.equal(issues.length, 1, `应识别出 bundle-mismatch: ${JSON.stringify(r.issues)}`)
+  assert.equal(issues[0].fix, 'reinstall', '依赖层面崩溃必须重装依赖，不能只 restart')
+})
+
+test('diagnoseCrash detects bundle-mismatch from Unknown file extension .css (rc.8 错配)', () => {
+  const logs = [
+    'TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".css" for D:\\2\\profiles\\web\\node_modules\\katex\\dist\\katex.min.css',
+  ]
+  const r = diagnoseCrash(logs)
+  const issues = r.issues.filter(i => i.type === 'bundle-mismatch')
+  assert.equal(issues.length, 1, `应识别出 bundle-mismatch: ${JSON.stringify(r.issues)}`)
+  assert.equal(issues[0].fix, 'reinstall')
+})
+
+test('diagnoseCrash detects bundle-mismatch from ToolRuntime prepare crash (#1677/#2130)', () => {
+  const logs = [
+    'Error: Cannot read properties of undefined (reading \'prepare\') — ToolRuntime 调度器未注册',
+  ]
+  const r = diagnoseCrash(logs)
+  const issues = r.issues.filter(i => i.type === 'bundle-mismatch')
+  assert.equal(issues.length, 1, `应识别出 bundle-mismatch: ${JSON.stringify(r.issues)}`)
+  assert.equal(issues[0].fix, 'reinstall')
+})
+
+test('diagnoseCrash detects duplicate loader entry (插件市场装插件后崩溃 #3263/#2889)', () => {
+  const logs = [
+    'Error: duplicate loader entry id: storage (already registered by another plugin)',
+  ]
+  const r = diagnoseCrash(logs)
+  const issues = r.issues.filter(i => i.type === 'duplicate-plugin')
+  assert.equal(issues.length, 1, `应识别出 duplicate-plugin: ${JSON.stringify(r.issues)}`)
+  assert.equal(issues[0].plugin, 'storage')
+  assert.equal(issues[0].fix, 'exclude-bundle', '重复注册应通过排除该插件修复')
+})
+
+test('diagnoseCrash detects spawn ENOENT toolchain crash (#2990)', () => {
+  const logs = [
+    'Error: spawn bash ENOENT — harness 因未捕获的 ENOENT 整体崩溃',
+  ]
+  const r = diagnoseCrash(logs)
+  const issues = r.issues.filter(i => i.type === 'tool-missing')
+  assert.equal(issues.length, 1, `应识别出 tool-missing: ${JSON.stringify(r.issues)}`)
+  assert.equal(issues[0].fix, 'restart', '工具链缺失重启即由启动器自动自举')
+})
+
 test('excludePlugin removes only the bad bundle, keeps others and node_modules', () => {
   const dir = tmp('ex')
   try {

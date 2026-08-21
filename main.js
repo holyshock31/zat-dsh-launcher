@@ -2357,6 +2357,33 @@ function registerIpc() {
     return ok({ removed: r.removed, bundles: r.bundles }, start.ok ? `已排除插件「${pluginName}」并重启 DSH` : `已排除插件「${pluginName}」，但重启失败：${start.message}`)
   })
 
+  // bundle-mismatch 类崩溃的一键修复：重装 profile 官方 bundle（force 同步到与主包匹配的版本）再重启。
+  // 这类崩溃在依赖层面（Unknown file extension .css / failed to import loader entry / prepare 未注册），
+  // 救援点（仅配置文件）救不了，必须重装依赖——复用 installProfileBundles(force) 的主路径。
+  ipcMain.handle('rescue:reinstall-bundles', async (_e, terminalId) => {
+    const id = requireTerminalId(terminalId)
+    if (!id) return { ok: false, message: '必须指定有效终端' }
+    const p = terminalPaths(id)
+    pushTerminalLog(id, 'info', '检测到 profile 插件版本不匹配：开始重新同步 profile 依赖…')
+    auditOp(id, '重装 profile 插件（bundle 同步）')
+    const tcEnv = await getToolchainEnv(id)
+    const updateExecute = makeToolchainExecute(tcEnv)
+    const bundles = await freshInstall.installProfileBundles({
+      nodeExe: findNodeExe(),
+      profileDir: p.profileDir,
+      toolsDir: path.join(p.home, '.tools'),
+      onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
+      execute: updateExecute,
+      force: true,
+    })
+    if (!bundles.ok) return { ok: false, message: `profile 插件同步失败：${bundles.message}` }
+    pushTerminalLog(id, 'info', 'profile 插件已同步，准备重启 DSH 生效')
+    const runtime = terminalSupervisor.get(id)
+    if (runtime.running || runtime.state === 'attached-running') await stopTerminal(id, { confirmAttached: true })
+    const start = await startTerminal(id)
+    return ok({}, start.ok ? '已重新同步 profile 插件并重启 DSH' : `已同步 profile 插件，但重启失败：${start.message}`)
+  })
+
   ipcMain.handle('env:list', () => envList())
   ipcMain.handle('env:switch', (_e, id) => {
     const r = envSwitch(id)

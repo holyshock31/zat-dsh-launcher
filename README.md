@@ -39,7 +39,7 @@
 ```powershell
 # 需要 Node.js 22+ 与 pnpm
 pnpm install
-pnpm test          # 运行 86 项单元测试
+pnpm test          # 运行 90 项单元测试
 pnpm dist          # 打包（NSIS 安装版 + win-unpacked）
 ```
 
@@ -52,7 +52,7 @@ pnpm dist          # 打包（NSIS 安装版 + win-unpacked）
 | 一键接入 | 接入本机已安装或正在运行的 Harness 实例 |
 | 隐藏控制台 | 子进程不弹黑色窗口 |
 | 实时会话日志 | 完整对话内容 + 标题前缀，多对话一眼区分 |
-| 救援中心 | 崩溃诊断 + 一键修复（排除插件 / 还原 / 重启） |
+| 救援中心 | 崩溃诊断 + 一键修复（排除插件 / 还原 / 重装依赖 / 重启） |
 | 自动更新 | Harness 双形态更新，失败自动回滚；启动器自身更新检查 |
 | 插件市场 | 内置 zat-dsh-engine，自动注入与更新 |
 | 安全删除 | 真实删除 + 实时进度 + 残留自动清理，删干净才提示 |
@@ -74,7 +74,7 @@ src/
   toolchain-execute.js  工具链执行器（node/pnpm/git 统一出口）
 renderer/               渲染进程：控制台 / 环境 / 救援 / 向导界面
 scripts/session-tail.cjs 会话增量读取 worker（隐藏控制台）
-tests/                  86 项单元测试
+tests/                  90 项单元测试
 ```
 
 ### 终端独立性保证
