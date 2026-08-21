@@ -1,5 +1,5 @@
 {
-  "version": "1.0.8",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.8/ZAT-DSH-Launcher-Setup-1.0.8.exe",
-  "notes": "v1.0.8 日志与终端选择体验优化：会话日志中 pwsh 命令摘要截断（80 字符，不再被长命令刷屏）；终端选择器悬停显示完整名称（截断不再困惑）。"
+  "version": "1.0.9",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.9/ZAT-DSH-Launcher-Setup-1.0.9.exe",
+  "notes": "v1.0.9 一键安装可靠性修复：移除 npm 装包回退（实测 npm 对 DSH 依赖树解析性能崩塌，7.5 分钟死转导致安装卡死）；安装统一走 pnpm（系统已装或自动自举），镜像源优先、失败明确报错；会话日志对话消息摘要化（长回复不再全文刷屏）。"
 }
