@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | **简体中文**
 
-> 多终端 [DeepSeek Harness](https://github.com/deepseek-ai) 桌面管理器：安装、启动、监控、更新、救援一条龙，**每个终端 100% 独立**，任何机器双击即用。
+> 多终端 [DeepSeek Harness](https://github.com/deepseek-ai) 桌面管理器：安装、启动、管理、更新、救援一条龙，**每个终端 100% 独立**，任何机器双击即用。
 
 一个应用管理多个 Harness：每个终端独立端口、独立 DSH_HOME、独立日志、独立会话数据。删除一个终端不影响其他终端，运行中的终端互不干扰。
 
@@ -49,7 +49,7 @@ pnpm dist          # 打包（NSIS 安装版 + win-unpacked）
 | --- | --- |
 | 多终端独立 | 独立端口 / DSH_HOME / 日志 / 注册表 / 会话数据，物理隔离 |
 | 一键全新安装 | 官方预构建包，镜像回退，零编译，装完自动启动 |
-| 自动扫描 / 手动接入 | 发现本机已安装或正在运行的 Harness，一键接入 |
+| 一键接入 | 接入本机已安装或正在运行的 Harness 实例 |
 | 隐藏控制台 | 子进程不弹黑色窗口 |
 | 实时会话日志 | 完整对话内容 + 标题前缀，多对话一眼区分 |
 | 救援中心 | 崩溃诊断 + 一键修复（排除插件 / 还原 / 重启） |
@@ -64,13 +64,13 @@ main.js                 Electron 主进程：终端生命周期 / IPC / 安装�
 src/
   fresh-install.js      一键安装管道（官方包下载、镜像回退、工具链自举）
   terminal-registry.js  终端注册表（多实例合并、tombstone）
-  terminal-supervisor.js 进程监控（隐藏控制台、崩溃自动重启）
-  terminal-discovery.js 运行实例 / 磁盘扫描
-  session-activity.js   会话活动提取（zstd 逐帧解析、流式碎片聚合）
+  terminal-supervisor.js 进程守护（隐藏控制台、崩溃自动重启）
+  terminal-discovery.js 已安装终端接入
+  session-activity.js   会话日志增量读取（zstd 逐帧、流式聚合）
   harness-update.js     Harness 更新（git 源码 / npm 包双形态 + 失败回滚）
   engine-manager.js     插件市场引擎（zat-dsh-engine）
   rescue.js             救援：崩溃诊断 / 救援点快照 / 还原
-  cli-probe.js          DSH CLI 参数兼容性探测
+  cli-probe.js          DSH CLI 参数兼容性检测
   toolchain-execute.js  工具链执行器（node/pnpm/git 统一出口）
 renderer/               渲染进程：控制台 / 环境 / 救援 / 向导界面
 scripts/session-tail.cjs 会话增量读取 worker（隐藏控制台）

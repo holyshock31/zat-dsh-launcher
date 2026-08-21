@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.md)
 
-> A multi-terminal [DeepSeek Harness](https://github.com/deepseek-ai) desktop manager for Windows: install, run, monitor, update and rescue multiple Harness instances — **each terminal is 100% independent**, zero dependencies, double-click to use.
+> A multi-terminal [DeepSeek Harness](https://github.com/deepseek-ai) desktop manager for Windows: install, run, manage, update and rescue multiple Harness instances — **each terminal is 100% independent**, zero dependencies, double-click to use.
 
 Manage many Harness instances from one app: each terminal has its own port, DSH_HOME, logs, registry and session data. Deleting one terminal never affects the others; running terminals never interfere with each other.
 
@@ -49,7 +49,7 @@ pnpm dist          # builds the NSIS installer + win-unpacked
 | --- | --- |
 | Independent terminals | Per-terminal port / DSH_HOME / logs / registry / session data, physically isolated |
 | One-click install | Official prebuilt packages, mirror fallback, zero compilation, auto-start |
-| Auto scan / manual attach | Detect installed or running Harness instances and attach with one click |
+| One-click attach | Attach to installed or running Harness instances |
 | Hidden console | No black windows for DSH or its children |
 | Live session logs | Full conversation content + title prefixes, multiple conversations at a glance |
 | Rescue center | Crash diagnosis + one-click fix (exclude plugin / restore / restart) |
@@ -65,12 +65,12 @@ src/
   fresh-install.js      Fresh-install pipeline (official package, mirror fallback, toolchain bootstrap)
   terminal-registry.js  Terminal registry (multi-instance merge, tombstones)
   terminal-supervisor.js Process supervision (hidden console, crash auto-restart)
-  terminal-discovery.js Running-instance / disk scanning
-  session-activity.js   Session activity extraction (per-frame zstd, streamed chunk aggregation)
+  terminal-discovery.js Installed-terminal attach
+  session-activity.js   Session log incremental reads (per-frame zstd, streamed aggregation)
   harness-update.js     Harness updates (git source & npm package, rollback on failure)
   engine-manager.js     Plugin-market engine (zat-dsh-engine)
   rescue.js             Rescue: crash diagnosis / snapshots / restore
-  cli-probe.js          DSH CLI argument compatibility probing (--no-open etc.)
+  cli-probe.js          DSH CLI argument compatibility checking (--no-open etc.)
   toolchain-execute.js  Toolchain executor (single exit for node/pnpm/git)
 renderer/               Renderer: console / environment / rescue / wizard UI
 scripts/session-tail.cjs Session incremental reader worker (hidden console)
