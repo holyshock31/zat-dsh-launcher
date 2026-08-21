@@ -57,6 +57,8 @@ async function cliNoOpenSupported(dshDir, nodeExe, opts = {}) {
       // 真实启动形态探测：--help 的选项列表不可靠（rc.7/rc.8 的 npm 包在 --help 时
       // 透传容忍、真实启动却报 "unknown option '--no-open'"）。改为带随机端口真实启动，
       // 3 秒内 stderr 出现 unknown option 即判不支持；否则视为支持（失败有启动自适应兜底）。
+      // ★ 1.0.13：探测子进程注入工具链 env（opts.env，调用方传 getToolchainEnv().env），
+      //   确保源码形态探测（tsx/esm）用自举 node 工具链，不依赖系统 PATH。
       const probePort = 50000 + Math.floor(Math.random() * 10000)
       const execArgs = built ? [cli, 'web', '--no-open', '--port', String(probePort)] : ['--import', 'tsx/esm', cli, 'web', '--no-open', '--port', String(probePort)]
       const r = await new Promise(resolve => {
@@ -67,7 +69,7 @@ async function cliNoOpenSupported(dshDir, nodeExe, opts = {}) {
             windowsHide: true,
             shell: false,
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env },
+            env: opts.env || { ...process.env },
           })
         } catch (e) { return resolve({ code: -1, out: String(e && e.message || e) }) }
         let out = ''

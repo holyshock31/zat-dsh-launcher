@@ -776,7 +776,9 @@ async function getToolchainEnv(terminalId) {
     toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
     onProgress: log,
   })
-  toolchainEnvCache = toolchain.env
+  // ★ 完整缓存 env + pnpmExe（1.0.13 修复：旧实现只存 env，自举好的 pnpmExe 被丢弃，
+  //   所有 toolchainEnv.pnpmExe 取值永远是 undefined → 回退 findPnpm 探测，链路脱节）
+  toolchainEnvCache = { env: toolchain.env, pnpmExe: toolchain.pnpmExe || '' }
   toolchainEnvCacheAt = now
   return toolchainEnvCache
 }
@@ -867,6 +869,13 @@ async function runAutoFixLevel(terminalId, p, issue, level) {
         if (r.ok) { logStep(`已还原救援点配置（${r.files.join('、')}）`); return true }
         logStep(`还原救援点失败：${r.message}`); return false
       }
+      if (issue.type === 'source-deps') {
+        // ★ 1.0.13：源码形态缺 devDependency（tsx）——装源码树依赖,不是 profile bundle
+        logStep('安装源码依赖（pnpm install）…')
+        const r = await installSourceDeps(terminalId, p)
+        if (r.ok) { logStep('源码依赖已安装'); return true }
+        logStep(`安装源码依赖失败：${r.message}`); return false
+      }
       if (issue.type === 'bundle-mismatch') {
         logStep('重装 profile 官方依赖…')
         const r = await reinstallProfileBundles(terminalId, p)
@@ -890,6 +899,15 @@ async function runAutoFixLevel(terminalId, p, issue, level) {
         logStep(restored ? `已还原救援点配置（${(r.files || []).join('、')}）` : `还原救援点失败：${r.message}`)
       } else {
         logStep('无救援点，跳过还原配置')
+      }
+      // ★ 1.0.13：源码形态（apps/cli/src/bin.ts）的依赖在源码树,不是 profile bundle——
+      //   必须装源码树依赖,否则 L2 重装 profile 官方依赖对源码缺 tsx 无效。
+      const srcBin = path.join(p.dshDir, 'apps', 'cli', 'src', 'bin.ts')
+      if (fs.existsSync(srcBin)) {
+        logStep('源码形态：安装源码树依赖…')
+        const sd = await installSourceDeps(terminalId, p)
+        if (!sd.ok) { logStep(`源码依赖安装失败：${sd.message}`); return false }
+        logStep('源码依赖已安装')
       }
       logStep('强制重装全部官方依赖…')
       const r = await reinstallProfileBundles(terminalId, p)
@@ -917,7 +935,7 @@ async function runAutoFixLevel(terminalId, p, issue, level) {
 // 重装 profile 官方 bundle（force 同步到与主包匹配的版本），复用更新链路主路径
 async function reinstallProfileBundles(terminalId, p) {
   const tcEnv = await getToolchainEnv(terminalId)
-  const updateExecute = makeToolchainExecute(tcEnv)
+  const updateExecute = makeToolchainExecute(tcEnv.env)
   return freshInstall.installProfileBundles({
     nodeExe: findNodeExe(),
     profileDir: p.profileDir,
@@ -926,6 +944,18 @@ async function reinstallProfileBundles(terminalId, p) {
     execute: updateExecute,
     force: true,
   })
+}
+
+// 源码形态装源码树依赖（pnpm install 到 dshDir）：与 rescue:install-source-deps 同一逻辑，
+// 供自动恢复阶梯 L1（source-deps）与 L2/L3 复用。返回 { ok, message }。
+async function installSourceDeps(terminalId, p) {
+  const tcEnv = await getToolchainEnv(terminalId)
+  const updateExecute = makeToolchainExecute(tcEnv.env)
+  const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), findNodeExe())
+  if (!pnpmExe) return { ok: false, message: '未找到 pnpm 且无法自举' }
+  const r = await updateExecute('安装依赖', pnpmExe, ['install', '--registry', 'https://registry.npmmirror.com/', '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], p.dshDir, undefined, 20 * 60 * 1000)
+  if (!r.ok) return { ok: false, message: String(r.err || r.out || '').slice(-300) }
+  return { ok: true }
 }
 
 // 用 node 直接跑 harness 的 CLI（无需 pnpm）。
@@ -943,12 +973,23 @@ function dshCommand(dshDir) {
   if (fs.existsSync(builtCli)) return { nodeExe, cli: builtCli, built: true }
   // 源码模式（apps/cli/src/bin.ts + tsx）：需要 tsx 才能跑。检测依赖缺失：
   // 克隆源码后未 pnpm install 会报 "Cannot find package 'tsx'"（用户反馈）。
+  // ★ 1.0.13：检测覆盖 pnpm 11 虚拟 store 布局（.pnpm/tsx@x/node_modules/tsx），
+  //   旧逻辑只查 .pnpm/node_modules/tsx（pnpm 11 无此路径）可能误判已装为缺失。
   const srcCli = path.join(dshDir, 'apps', 'cli', 'src', 'bin.ts')
   let depsMissing = false
   if (fs.existsSync(srcCli)) {
-    const hasTsx = fs.existsSync(path.join(dshDir, 'node_modules', 'tsx')) ||
+    const hasTsx =
+      fs.existsSync(path.join(dshDir, 'node_modules', 'tsx')) ||
       fs.existsSync(path.join(dshDir, 'node_modules', '.pnpm', 'node_modules', 'tsx')) ||
-      fs.existsSync(path.join(dshDir, 'node_modules', '.bin', 'tsx.cmd'))
+      // pnpm 11：.pnpm/tsx@<ver>/node_modules/tsx（扫描任意 tsx@* 目录）
+      fs.existsSync(path.join(dshDir, 'node_modules', '.bin', 'tsx.cmd')) ||
+      (() => {
+        try {
+          const pnpm = path.join(dshDir, 'node_modules', '.pnpm')
+          if (!fs.existsSync(pnpm)) return false
+          return fs.readdirSync(pnpm).some(n => n.startsWith('tsx@') && fs.existsSync(path.join(pnpm, n, 'node_modules', 'tsx')))
+        } catch { return false }
+      })()
     depsMissing = !hasTsx
   }
   return { nodeExe, cli: srcCli, built: false, depsMissing }
@@ -1010,7 +1051,8 @@ function copyDirTree(source, target, excludes = []) {
 async function execDsh(args, opts = {}) {
   const p = envPaths()
   // 白板原则：内部 dsh CLI 调用同样注入自带工具链 PATH（node/pnpm/npm/git），不依赖机器预装。
-  let toolchainEnv = toolchainEnvCache || null
+  // ★ 1.0.13：toolchainEnvCache 现在 = { env, pnpmExe }，取 .env；未缓存时手动拼环境。
+  let toolchainEnv = toolchainEnvCache ? toolchainEnvCache.env : null
   if (!toolchainEnv) {
     try {
       const nodeExe = findNodeExe()
@@ -1162,7 +1204,7 @@ async function startTerminal(terminalId, startOptions = {}) {
       const engineDir = path.join(engineProfileDir, 'node_modules', 'zat-dsh-engine')
       // 白板原则：引擎下载的 git 调用走内部工具链（系统无 git 也能装）
       let engineExecute = null
-      try { engineExecute = makeToolchainExecute(await getToolchainEnv(terminalId)) } catch { /* 工具链失败则用系统 git 兜底 */ }
+      try { engineExecute = makeToolchainExecute((await getToolchainEnv(terminalId)).env) } catch { /* 工具链失败则用系统 git 兜底 */ }
       const dl = await engineManager.downloadEngineTo(engineDir, (stage, message) => pushTerminalLog(terminalId, 'info', `[${stage}] ${message}`), engineExecute)
       if (!dl.ok) {
         pushTerminalLog(terminalId, 'error', `插件商店自动下载失败：${dl.message}`)
@@ -1197,7 +1239,7 @@ async function startTerminal(terminalId, startOptions = {}) {
   // 但 npm 预构建包（rc.7 等）的 web 命令不支持 --no-open，传了会 unknown option 启动即退
   // （0.6.21 用户：装好 D:\4 后启动失败 3 次）。启动前实际探测参数兼容性，不支持则省略。
   let noOpen = true
-  try { noOpen = await cliProbe.cliNoOpenSupported(p.dshDir, findNodeExe()) } catch { noOpen = false }
+  try { noOpen = await cliProbe.cliNoOpenSupported(p.dshDir, findNodeExe(), { env: toolchainEnv && toolchainEnv.env || undefined }) } catch { noOpen = false }
   if (!noOpen) pushTerminalLog(terminalId, 'info', '当前 DSH 版本不支持 --no-open（已自动省略；浏览器由 DSH 或手动打开）')
   const webArgs = ['web', '--port', String(p.port)]
   if (noOpen) webArgs.splice(1, 0, '--no-open')
@@ -1208,10 +1250,13 @@ async function startTerminal(terminalId, startOptions = {}) {
     pushTerminalLog(terminalId, 'warn', '检测到源码形态但依赖未安装（缺 tsx），自动安装依赖…')
     try {
       const fi = freshInstall
+      // ★ 1.0.13：toolchainEnv 现在 = { env, pnpmExe }，用它自举好的 pnpmExe 和 env
+      //    （旧实现 toolchainEnv.pnpmExe 永远 undefined + makeToolchainExecute(null→{}) PATH 全丢）
       const pnpmExe = fi.executablePnpm(toolchainEnv && toolchainEnv.pnpmExe || fi.findPnpm(), findNodeExe()) || null
       if (pnpmExe) {
-        const setExec = makeToolchainExecute(toolchainEnv || {})
-        const r = await setExec('安装依赖', pnpmExe, ['install', '--registry', 'https://registry.npmmirror.com/', '--config.dangerously-allow-all-builds=true'], p.dshDir, undefined, 20 * 60 * 1000)
+        const setExec = makeToolchainExecute((toolchainEnv && toolchainEnv.env) || undefined)
+        // ★ 1.0.13：与主包/bundle 一致，追加 --config.package-import-method=copy（终端独立拷贝）
+        const r = await setExec('安装依赖', pnpmExe, ['install', '--registry', 'https://registry.npmmirror.com/', '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], p.dshDir, undefined, 20 * 60 * 1000)
         if (r.ok) {
           pushTerminalLog(terminalId, 'info', '源码依赖已安装完成，继续启动…')
         } else {
@@ -1233,7 +1278,7 @@ async function startTerminal(terminalId, startOptions = {}) {
       pushTerminalLog(terminalId, 'error', `源码依赖自动安装异常：${friendlyError(e)}`)
     }
   }
-  const { file, args, cwd, env } = spawnDshArgs(webArgs, p.dshDir, p.terminal, toolchainEnv)
+  const { file, args, cwd, env } = spawnDshArgs(webArgs, p.dshDir, p.terminal, toolchainEnv && toolchainEnv.env || undefined)
   // 根修弹窗：启动器无控制台 GUI 直接 spawn 控制台程序会让 Windows 给每个子进程开新可见窗口。
   // 用隐藏控制台启动 DSH（CREATE_NEW_CONSOLE + SW_HIDE），DSH 及其所有子进程继承同一隐藏控制台，
   // 与官方终端启动等效，弹窗从根上消失。失败时自动退回普通 spawn（保底可用）。
@@ -1533,13 +1578,38 @@ async function repairEnv() {
   if (problems.length === 0) {
     return { ok: true, message: '环境正常，无需修复', items }
   }
-  let fixed = false
-  if (!p.dshDir || !fs.existsSync(p.dshDir)) {
-    pushLog('error', `DSH 目录不存在：${p.dshDir || '未配置'}。请在「环境」页选择正确的 DSH 目录。`)
-  } else {
-    fixed = true
+  const log = (m) => { try { pushTerminalLog(terminal ? terminal.id : '', 'info', m) } catch { /* 无终端时静默 */ } }
+  let fixed = 0
+  // 1) Node 缺失:自举(工具链 ensureNodeExe 会自动下载便携版)
+  const nodeItem = items.find(i => i.label === 'Node' && i.status === 'error')
+  if (nodeItem) {
+    log('Node 缺失,正在自举 Node.js…')
+    try {
+      const info = await freshInstall.ensureNodeExe({ nodeExe: '', toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools') })
+      if (info.ok) { fixed++; log(`Node 已自举: ${info.nodeExe}`) }
+    } catch (e) { log(`Node 自举失败: ${friendlyError(e)}`) }
   }
-  return { ok: fixed, message: fixed ? '环境已修复' : '存在无法自动修复的问题，请手动处理', items: envCheckItems() }
+  // 2) DSH 目录不存在:提示用户在环境页选择(无法自动修复,但明确说明)
+  const dshItem = items.find(i => i.label === 'DSH 目录' && i.status === 'error')
+  if (dshItem) {
+    log(`DSH 目录不存在(${p.dshDir || '未配置'}),请在「环境」页点「选择 DSH 目录」`)
+  }
+  // 3) Profile 未初始化(警告):创建基础 profile(bundle 声明)
+  const profItem = items.find(i => i.label === 'Profile' && i.status === 'warn')
+  if (profItem) {
+    try {
+      fs.mkdirSync(p.profileDir, { recursive: true })
+      const pkgFile = path.join(p.profileDir, 'package.json')
+      if (!fs.existsSync(pkgFile)) {
+        fs.writeFileSync(pkgFile, JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } } }, null, 2), 'utf8')
+        fs.writeFileSync(path.join(p.profileDir, 'cordis.yml'), '[]\n', 'utf8')
+        fs.writeFileSync(path.join(p.profileDir, 'cordis.patch.yml'), '[]\n', 'utf8')
+        fixed++
+        log('Profile 已初始化(基础 bundle 声明)')
+      }
+    } catch (e) { log(`Profile 初始化失败: ${friendlyError(e)}`) }
+  }
+  return { ok: fixed > 0, message: fixed > 0 ? `环境已修复(${fixed} 项)` : '存在无法自动修复的问题,已在日志说明原因', items: envCheckItems() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1973,7 +2043,7 @@ async function installFreshTerminal(options = {}) {
   // 不依赖机器预装。先自举工具链，后续 installOfficialPackage / downloadEngineTo /
   // installProfileBundles 的 pnpm/npm/git 调用全部走内置工具。
   const installTcEnv = await getToolchainEnv('')
-  const installExecute = makeToolchainExecute(installTcEnv)
+  const installExecute = makeToolchainExecute(installTcEnv.env)
   onProgress('准备', `端口 ${port} 已安全分配，安装到独立目录 ${root}（与 3080 完全隔离）`)
   try {
     // ★ 主路径：下载官方预构建包（镜像优先/官方回退，自带前端 dist，即装即跑，零编译）
@@ -2167,7 +2237,11 @@ function registerIpc() {
   ipcMain.handle('harness:check-update', async (_e, terminalId) => {
     const id = requireTerminalId(terminalId)
     if (!id) return { ok: false, message: '必须指定有效终端' }
-    return checkHarnessUpdate(terminalPaths(id).dshDir, undefined, harnessUpdate.npmLatestProbe(findNodeExe()))
+    // ★ 1.0.13：git 形态更新检查必须走工具链 execute（自举 git），
+    //   旧实现传 undefined → 默认 run（系统 git）→ 无系统 git 的机器检查永远失败。
+    let execute = undefined
+    try { execute = makeToolchainExecute((await getToolchainEnv(id)).env) } catch { /* 工具链失败时用默认（系统 git 兜底） */ }
+    return checkHarnessUpdate(terminalPaths(id).dshDir, execute, harnessUpdate.npmLatestProbe(findNodeExe()))
   })
   ipcMain.handle('harness:install-update', async (_e, terminalId) => {
     const id = requireTerminalId(terminalId)
@@ -2185,7 +2259,7 @@ function registerIpc() {
     // 白板原则：更新/构建链路需要的 node/pnpm/npm/git 全部自动自举并注入 PATH
     // （DSH 依赖 postinstall 执行 `node`、build 脚本执行 `npm`/`pnpm`）。
     const tcEnv = await getToolchainEnv(id)
-    const updateExecute = makeToolchainExecute(tcEnv)
+    const updateExecute = makeToolchainExecute(tcEnv.env)
     pushTerminalLog(id, 'info', '正在检查并安装 Harness 更新…')
     // ★ 用工具链已自举的 pnpmExe，绝不重新探测（findPnpm 可能因缓存路径差异返回空 →
     //   更新链路 pnpm 为空导致依赖安装失败。1.0.10 修复）。
@@ -2456,7 +2530,7 @@ function registerIpc() {
     onProgress('引擎', forceEngine ? '检测到已有引擎，强制重新下载最新版…' : '下载 zat-dsh-engine（git 浅克隆，官方优先/镜像回退）…')
     // 白板原则：引擎下载的 git 调用走内部工具链（系统无 git 也能装）
     let engineExecute = null
-    try { engineExecute = makeToolchainExecute(await getToolchainEnv(id)) } catch { /* 工具链失败则用系统 git 兜底 */ }
+    try { engineExecute = makeToolchainExecute((await getToolchainEnv(id)).env) } catch { /* 工具链失败则用系统 git 兜底 */ }
     const engine = await engineManager.downloadEngineTo(engineDir, onProgress, engineExecute, { force: forceEngine })
     if (!engine.ok) return { ok: false, message: `引擎下载失败：${engine.message}` }
     try { fs.rmSync(path.join(engineDir, '.git'), { recursive: true, force: true }) } catch { /* 忽略 */ }
@@ -2477,7 +2551,9 @@ function registerIpc() {
     const terminal = terminalRegistry.get(terminalId)
     return path.join(terminal.dshHome || resolveHome(terminal.dshHome), 'profiles', terminal.profileName || 'web')
   }
-  const readTerminalLogTail = (terminalId, maxLines = 600) => {
+  const readTerminalLogTail = (terminalId, maxLines = 1500) => {
+    // ★ 1.0.13：600 → 1500 行。崩溃堆栈(ERR_MODULE_NOT_FOUND 等)可能在旧日志里,
+    //   600 行只装下最近轮询的"检测到终端正在运行",真正错误被截掉 → 诊断扑空。
     const file = path.join(app.getPath('userData'), 'logs', terminalId, 'launcher.log')
     try { return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).slice(-maxLines) : [] } catch { return [] }
   }
@@ -2527,8 +2603,13 @@ function registerIpc() {
     if (!id) return { ok: false, message: '必须指定有效终端' }
     const rescueDir = terminalRescueDir(id)
     const status = rescue.rescueStatus(rescueDir)
-    if (status.lastCrash && Array.isArray(status.lastCrash.issues) && status.lastCrash.issues.length) {
-      return ok({ issues: status.lastCrash.issues, crash: status.lastCrash, source: 'last-crash' }, status.lastCrash.recoveredAt ? '上一次崩溃已恢复，保留事故记录供查看' : '检测到上一次崩溃记录')
+    // ★ 1.0.13：lastCrash 已恢复（recoveredAt>0）或崩溃记录太旧（超过 1 天）时不再优先返回历史，
+    //   改读当前日志——否则"旧问题旧按钮"死挂（用户朋友 1.0.10 截图：一直显示 22:43 的 tsx 历史）。
+    //   历史记录保留供查看,只有 recoveredAt=0 且 24 小时内的才作为主信息源。
+    const crash = status.lastCrash || null
+    const crashFresh = crash && !crash.recoveredAt && (Date.now() - Number(crash.at || 0)) < 24 * 60 * 60 * 1000
+    if (crashFresh && Array.isArray(crash.issues) && crash.issues.length) {
+      return ok({ issues: crash.issues, crash, source: 'last-crash' }, '检测到上一次崩溃记录')
     }
     const lines = readTerminalLogTail(id)
     const goodMarkers = ['终端已就绪', '检测到终端正在运行', 'dsh web: http']
@@ -2538,7 +2619,13 @@ function registerIpc() {
     }
     const recent = since >= 0 ? lines.slice(since + 1) : lines
     const r = rescue.diagnoseCrash(recent)
-    return ok({ issues: r.issues, source: 'current-log' }, r.issues.length ? `检测到 ${r.issues.length} 个崩溃原因` : '未检测到已知崩溃原因')
+    // 当前日志无新问题但有历史崩溃 → 附加历史供参考（source 标 last-crash 之前的记录）
+    const result = { issues: r.issues, source: 'current-log' }
+    if (!r.issues.length && crash && crash.issues && crash.issues.length) {
+      result.lastCrash = crash
+      result.message = '当前日志无崩溃,展示上一次崩溃记录(供参考)'
+    }
+    return ok(result, result.message || (r.issues.length ? `检测到 ${r.issues.length} 个崩溃原因` : '未检测到已知崩溃原因'))
   })
   ipcMain.handle('rescue:exclude', async (_e, terminalId, pluginName) => {
     const id = requireTerminalId(terminalId)
@@ -2564,7 +2651,7 @@ function registerIpc() {
     pushTerminalLog(id, 'info', '检测到 profile 插件版本不匹配：开始重新同步 profile 依赖…')
     auditOp(id, '重装 profile 插件（bundle 同步）')
     const tcEnv = await getToolchainEnv(id)
-    const updateExecute = makeToolchainExecute(tcEnv)
+    const updateExecute = makeToolchainExecute(tcEnv.env)
     const bundles = await freshInstall.installProfileBundles({
       nodeExe: findNodeExe(),
       profileDir: p.profileDir,
@@ -2589,19 +2676,9 @@ function registerIpc() {
     const p = terminalPaths(id)
     pushTerminalLog(id, 'info', '检测到源码形态依赖缺失，开始安装源码依赖（pnpm install）…')
     auditOp(id, '安装源码依赖（tsx 等 devDependencies）')
-    const tcEnv = await getToolchainEnv(id)
-    const updateExecute = makeToolchainExecute(tcEnv)
-    const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), findNodeExe())
-    if (!pnpmExe) {
-      // pnpm 三段保障：探测失败再自举
-      try {
-        const boot = await freshInstall.ensurePnpm({ nodeExe: findNodeExe(), toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools') })
-        pnpmExe = freshInstall.executablePnpm(boot, findNodeExe())
-      } catch { /* 最后仍失败则报错 */ }
-    }
-    if (!pnpmExe) return { ok: false, message: '未找到 pnpm 且自举失败，无法安装源码依赖' }
-    const r = await updateExecute('安装依赖', pnpmExe, ['install', '--registry', 'https://registry.npmmirror.com/', '--config.dangerously-allow-all-builds=true'], p.dshDir, undefined, 20 * 60 * 1000)
-    if (!r.ok) return { ok: false, message: `源码依赖安装失败：${String(r.err || r.out || '').slice(-300)}` }
+    // ★ 1.0.13：复用 installSourceDeps（工具链 env + pnpmExe + copy 参数与阶梯 L1 一致）
+    const sd = await installSourceDeps(id, p)
+    if (!sd.ok) return { ok: false, message: `源码依赖安装失败：${sd.message}` }
     pushTerminalLog(id, 'info', '源码依赖已安装，准备重启 DSH 生效')
     const runtime = terminalSupervisor.get(id)
     if (runtime.running || runtime.state === 'attached-running') await stopTerminal(id, { confirmAttached: true })

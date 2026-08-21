@@ -91,7 +91,10 @@ class TerminalRegistry {
         if (!diskTerminals.has(terminal.id) && !this.terminals.has(terminal.id)) diskTerminals.set(terminal.id, terminal)
       } catch { /* skip invalid */ }
     }
-    const removed = new Set(this.removedTerminalIds || [])
+    // ★ 1.0.13：removedTerminalIds 必须与磁盘并集(全局墓碑)——否则另一实例(旧窗口残留)
+    //   save 时把已删除的终端写回,删除"复活"。删除是全局全局的,墓碑只增不减。
+    const removed = new Set([...new Set(this.removedTerminalIds || [])])
+    if (Array.isArray(disk.removedTerminalIds)) for (const rid of disk.removedTerminalIds.map(String).filter(Boolean)) removed.add(rid)
     const candidates = [...diskTerminals.values(), ...this.list()].filter(t => !removed.has(String(t.id)))
     const byPort = new Map()
     for (const terminal of candidates) {
