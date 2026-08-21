@@ -1,5 +1,5 @@
 {
-  "version": "1.0.7",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.7/ZAT-DSH-Launcher-Setup-1.0.7.exe",
-  "notes": "v1.0.7 更新体验全面提速：源码树形态更新提速 5.5 倍（增量编译优先，产物缺失才全量重编，实测 3.5 分钟→38 秒）；更新完成后自动重启生效（点完按钮即完事，不再手动启动）；更新全程实时步骤日志（代码拉取/依赖安装/编译进度逐条显示）；崩溃自动恢复阶梯 L1 对症修复→L2 完整恢复→L3 工厂重置。"
+  "version": "1.0.8",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.8/ZAT-DSH-Launcher-Setup-1.0.8.exe",
+  "notes": "v1.0.8 日志与终端选择体验优化：会话日志中 pwsh 命令摘要截断（80 字符，不再被长命令刷屏）；终端选择器悬停显示完整名称（截断不再困惑）。"
 }
