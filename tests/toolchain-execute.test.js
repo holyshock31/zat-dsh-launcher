@@ -62,3 +62,15 @@ test('execFile .cmd is never used: object args never become the execFile file', 
   assert.equal(r2.ok, true, r2.err)
   assert.ok(r1.out.includes('obj-ok') && r2.out.includes('obj-ok'))
 })
+
+test('raw .mjs/.cjs path is auto-wrapped with node (spawn UNKNOWN regression)', async () => {
+  // 工具链自举返回原始 pnpm.mjs 路径时，直接 execFile 在 Windows Electron Node 20 抛 spawn UNKNOWN。
+  // 执行器必须自动转成 node <file>，而不是把 JS 文件当可执行文件 CreateProcess。
+  const env = { ...process.env, PATH: `${path.dirname(process.execPath)};${process.env.PATH || ''}` }
+  const exec = makeToolchainExecute(env)
+  const fakeMjs = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'zat-tce3-')), 'fake.mjs')
+  fs.writeFileSync(fakeMjs, 'console.log("raw-mjs-ok");\n', 'utf8')
+  const r = await exec('下载', fakeMjs, ['--x'], undefined, null, 15000, env)
+  assert.equal(r.ok, true, r.err)
+  assert.ok(r.out.includes('raw-mjs-ok'))
+})

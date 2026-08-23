@@ -8,6 +8,7 @@ const path = require('node:path')
 const {
   probeSource, reachableSource, downloadDshTo,
   ensurePnpm, findPnpm, pickRegistry,
+  executablePnpmOrRaw,
 } = require('../src/fresh-install')
 const {
   detectEngine, downloadEngineTo, injectEngine, verifyEngine, restoreEngine, enginePatchBlock,
@@ -80,6 +81,23 @@ test('ensurePnpm 缓存 exists 时直接返回（内置 pnpm 单文件）', asyn
 
 test('findPnpm 返回字符串（不抛错）', () => {
   assert.equal(typeof findPnpm(), 'string')
+})
+
+test('executablePnpmOrRaw 归一化原始 .mjs/.cjs（spawn UNKNOWN 回归）', () => {
+  const dir = tmp('zat-pnpm-norm')
+  const raw = path.join(dir, 'pnpm.mjs')
+  fs.writeFileSync(raw, 'console.log(1)\n', 'utf8')
+  const wrapped = executablePnpmOrRaw(raw, process.execPath)
+  assert.equal(wrapped.file, process.execPath)
+  assert.ok(wrapped.args.includes(raw))
+  const obj = { file: process.execPath, args: [raw] }
+  assert.equal(executablePnpmOrRaw(obj, process.execPath), obj)
+  const exe = path.join(dir, 'pnpm.exe')
+  fs.writeFileSync(exe, '')
+  const exeObj = executablePnpmOrRaw(exe, process.execPath)
+  assert.equal(exeObj.file, exe)
+  assert.deepEqual(exeObj.args, [])
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('pickRegistry 在无网络执行器下返回 npmmirror 兜底', async () => {

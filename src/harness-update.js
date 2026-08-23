@@ -21,11 +21,11 @@ const { execFile } = require('node:child_process')
 
 const NPM_REGISTRIES = ['https://registry.npmjs.org/', 'https://registry.npmmirror.com/']
 
-const { expandExec } = require('./toolchain-execute')
+const { expandExec, wrapJsFile } = require('./toolchain-execute')
 
 function run(file, args, cwd, timeout = 120000) {
   return new Promise(resolve => {
-    const n = expandExec(file, args)
+    const n = wrapJsFile(expandExec(file, args))
     execFile(n.file, n.args, { cwd, windowsHide: true, maxBuffer: 8 * 1024 * 1024, timeout }, (error, stdout, stderr) => {
       resolve({ ok: !error, code: error && error.code || 0, out: String(stdout || '').trim(), err: String(stderr || error && error.message || '').trim() })
     })
@@ -113,9 +113,9 @@ async function runBuild(dshDir, execute, env, pnpmExe, onStep) {
     let pnpmFallback = pnpmExe || null
     if (!pnpmFallback) {
       const fi = require('./fresh-install')
-      pnpmFallback = fi.executablePnpm(fi.findPnpm(), process.execPath)
+      pnpmFallback = fi.executablePnpm(fi.findPnpm(), 'node')
       if (!pnpmFallback) {
-        try { pnpmFallback = fi.executablePnpm(await fi.ensurePnpm({ nodeExe: process.execPath, toolsDir: path.join(os.tmpdir(), 'zat-tools') }), process.execPath) } catch { /* 放弃兜底 */ }
+        try { pnpmFallback = fi.executablePnpm(await fi.ensurePnpm({ nodeExe: 'node', toolsDir: path.join(os.tmpdir(), 'zat-tools') }), 'node') } catch { /* 放弃兜底 */ }
       }
     }
     const p = await execute(pnpmFallback || null, ['run', 'build'], dshDir, 25 * 60 * 1000, buildEnv)
@@ -420,12 +420,12 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
     // pnpm 三层保障（1.0.10）：显式传入 → 磁盘探测 → 自举，否则 git 形态更新的
     // 依赖安装 execute(null) 直接失败（"依赖安装失败"误导用户）。
     const fi = require('./fresh-install')
-    pnpm = fi.executablePnpm(fi.findPnpm(), process.execPath)
+    pnpm = fi.executablePnpm(fi.findPnpm(), 'node')
     if (!pnpm) {
       step('未找到 pnpm，正在自举…')
       try {
-        const boot = await fi.ensurePnpm({ nodeExe: process.execPath, toolsDir: path.join(os.tmpdir(), 'zat-tools'), onProgress: step })
-        pnpm = fi.executablePnpm(boot, process.execPath)
+        const boot = await fi.ensurePnpm({ nodeExe: 'node', toolsDir: path.join(os.tmpdir(), 'zat-tools'), onProgress: step })
+        pnpm = fi.executablePnpm(boot, 'node')
       } catch (e) {
         step(`pnpm 自举失败：${e && e.message || e}`)
       }

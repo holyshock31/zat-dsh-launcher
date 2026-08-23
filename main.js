@@ -25,7 +25,7 @@ const { planTerminalDeletion } = require('./src/terminal-files')
 const toolchainExec = require('./src/toolchain-execute')
 const cliProbe = require('./src/cli-probe')
 
-const APP_VERSION = '1.0.13'
+const APP_VERSION = '1.2.0'
 
 // ---------------------------------------------------------------------------
 // 白板/交付版隔离：打包版使用按版本隔离的数据目录（%APPDATA%\ZAT-Launcher\v<版本>），
@@ -472,8 +472,9 @@ function initializeTerminalSupervisor() {
       if (st !== 'manual' && st !== 'scanned' && st !== 'attached' && st !== 'filesystem') continue
       const inspected = inspectDshDir(normalizeNpmRoot(terminal.dshDir))
       const real = inspected && inspected.mode === 'npm' ? inspected.dir : resolveHome('')
+      const realIsNpx = inspected && (inspected.mode === 'npx' || inspected.mode === 'npm-standalone')
       const old = String(terminal.dshHome || '')
-      if (old && old !== real && old.toLowerCase().startsWith(managedPrefix)) {
+      if (old && old !== real && (old.toLowerCase().startsWith(managedPrefix) || realIsNpx)) {
         terminalRegistry.update(terminal.id, { dshHome: real })
         pushLog('info', `已修正终端「${terminal.name}」的 DSH_HOME → ${real}`)
       }
@@ -789,7 +790,8 @@ async function getToolchainEnv(terminalId) {
   })
   // ★ 完整缓存 env + pnpmExe（1.0.13 修复：旧实现只存 env，自举好的 pnpmExe 被丢弃，
   //   所有 toolchainEnv.pnpmExe 取值永远是 undefined → 回退 findPnpm 探测，链路脱节）
-  toolchainEnvCache = { env: toolchain.env, pnpmExe: toolchain.pnpmExe || '' }
+  //   nodeExe 一并缓存：无系统 Node 的机器由工具链自举的 node 接续 registry/版本探测。
+  toolchainEnvCache = { env: toolchain.env, pnpmExe: toolchain.pnpmExe || '', nodeExe: toolchain.nodeExe || '' }
   toolchainEnvCacheAt = now
   return toolchainEnvCache
 }
@@ -948,7 +950,7 @@ async function reinstallProfileBundles(terminalId, p) {
   const tcEnv = await getToolchainEnv(terminalId)
   const updateExecute = makeToolchainExecute(tcEnv.env)
   return freshInstall.installProfileBundles({
-    nodeExe: findNodeExe(),
+    nodeExe: tcEnv.nodeExe || findNodeExe(),
     profileDir: p.profileDir,
     toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
     onProgress: (stage, message) => pushTerminalLog(terminalId, 'info', `[${stage}] ${message}`),
@@ -962,7 +964,7 @@ async function reinstallProfileBundles(terminalId, p) {
 async function installSourceDeps(terminalId, p) {
   const tcEnv = await getToolchainEnv(terminalId)
   const updateExecute = makeToolchainExecute(tcEnv.env)
-  const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), findNodeExe())
+  const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), tcEnv.nodeExe || findNodeExe())
   if (!pnpmExe) return { ok: false, message: '未找到 pnpm 且无法自举' }
   const r = await updateExecute('安装依赖', pnpmExe, ['install', '--registry', 'https://registry.npmmirror.com/', '--config.dangerously-allow-all-builds=true', '--config.package-import-method=copy'], p.dshDir, undefined, 20 * 60 * 1000)
   if (!r.ok) return { ok: false, message: String(r.err || r.out || '').slice(-300) }
@@ -1250,7 +1252,7 @@ async function startTerminal(terminalId, startOptions = {}) {
   // 但 npm 预构建包（rc.7 等）的 web 命令不支持 --no-open，传了会 unknown option 启动即退
   // （0.6.21 用户：装好 D:\4 后启动失败 3 次）。启动前实际探测参数兼容性，不支持则省略。
   let noOpen = true
-  try { noOpen = await cliProbe.cliNoOpenSupported(p.dshDir, findNodeExe(), { env: toolchainEnv && toolchainEnv.env || undefined }) } catch { noOpen = false }
+  try { noOpen = await cliProbe.cliNoOpenSupported(p.dshDir, (toolchainEnv && toolchainEnv.nodeExe) || findNodeExe(), { env: toolchainEnv && toolchainEnv.env || undefined }) } catch { noOpen = false }
   if (!noOpen) pushTerminalLog(terminalId, 'info', '当前 DSH 版本不支持 --no-open（已自动省略；浏览器由 DSH 或手动打开）')
   const webArgs = ['web', '--port', String(p.port)]
   if (noOpen) webArgs.splice(1, 0, '--no-open')
@@ -1263,7 +1265,7 @@ async function startTerminal(terminalId, startOptions = {}) {
       const fi = freshInstall
       // ★ 1.0.13：toolchainEnv 现在 = { env, pnpmExe }，用它自举好的 pnpmExe 和 env
       //    （旧实现 toolchainEnv.pnpmExe 永远 undefined + makeToolchainExecute(null→{}) PATH 全丢）
-      const pnpmExe = fi.executablePnpm(toolchainEnv && toolchainEnv.pnpmExe || fi.findPnpm(), findNodeExe()) || null
+      const pnpmExe = fi.executablePnpm(toolchainEnv && toolchainEnv.pnpmExe || fi.findPnpm(), (toolchainEnv && toolchainEnv.nodeExe) || findNodeExe()) || null
       if (pnpmExe) {
         const setExec = makeToolchainExecute((toolchainEnv && toolchainEnv.env) || undefined)
         // ★ 1.0.13：与主包/bundle 一致，追加 --config.package-import-method=copy（终端独立拷贝）
@@ -1744,7 +1746,7 @@ async function connectDshDirectory(dshDirInput, sourceType = 'manual', options =
   const inspectedMode = inspected.mode || 'source'
   const dshHome = inspectedMode === 'npm'
     ? inspected.dir
-    : (sourceType === 'manual' || sourceType === 'attached' || sourceType === 'scanned' || sourceType === 'filesystem')
+    : (inspectedMode === 'npx' || inspectedMode === 'npm-standalone' || sourceType === 'manual' || sourceType === 'attached' || sourceType === 'scanned' || sourceType === 'filesystem')
       ? resolveHome('')
       : path.join(app.getPath('userData'), 'terminals', id, 'dsh-home')
   fs.mkdirSync(dshHome, { recursive: true })
@@ -2049,11 +2051,13 @@ async function installFreshTerminal(options = {}) {
   const dshDir = path.join(root, 'node_modules', '@deepseek-ai', 'dsh')
   const dshHome = root
   const profileDir = path.join(dshHome, 'profiles', 'web')
-  const nodeExe = findNodeExe()
+  const detectedNodeExe = findNodeExe()
   // 白板原则：一键安装/部署全部使用启动器内置工具链（node/pnpm/npm/git 自举到 zat-tools），
   // 不依赖机器预装。先自举工具链，后续 installOfficialPackage / downloadEngineTo /
   // installProfileBundles 的 pnpm/npm/git 调用全部走内置工具。
   const installTcEnv = await getToolchainEnv('')
+  // 工具链自举返回的 nodeExe 优先：无系统 Node 的机器也用它做后续 registry/版本探测
+  const nodeExe = installTcEnv.nodeExe || detectedNodeExe
   const installExecute = makeToolchainExecute(installTcEnv.env)
   onProgress('准备', `端口 ${port} 已安全分配，安装到独立目录 ${root}（与 3080 完全隔离）`)
   try {
@@ -2274,16 +2278,16 @@ function registerIpc() {
     pushTerminalLog(id, 'info', '正在检查并安装 Harness 更新…')
     // ★ 用工具链已自举的 pnpmExe，绝不重新探测（findPnpm 可能因缓存路径差异返回空 →
     //   更新链路 pnpm 为空导致依赖安装失败。1.0.10 修复）。
-    const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), findNodeExe()) || null
+    const pnpmExe = freshInstall.executablePnpm(tcEnv.pnpmExe || freshInstall.findPnpm(), tcEnv.nodeExe || findNodeExe()) || null
     const result = await installHarnessUpdate(p.dshDir, snapshotDir, updateExecute, {
       pnpmExe,
-      probeLatest: harnessUpdate.npmLatestProbe(findNodeExe()),
+      probeLatest: harnessUpdate.npmLatestProbe(tcEnv.nodeExe || findNodeExe()),
       onStep: (msg) => pushTerminalLog(id, 'info', `[更新] ${msg}`),
       npmUpdater: async () => {
         // 更新主包（npm 包形态），成功后再强制同步 profile bundle 到 @next：
         // 主包升级后 bundle 不跟上的话，rc 错配导致启动崩溃（Unknown file extension .css）。
         const up = await freshInstall.updateNpmPackage({
-          nodeExe: findNodeExe(),
+          nodeExe: tcEnv.nodeExe || findNodeExe(),
           targetDir: p.home,
           toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
           pnpmExe: tcEnv.pnpmExe || '',
@@ -2292,7 +2296,7 @@ function registerIpc() {
         if (!up.ok) return up
         pushTerminalLog(id, 'info', '主包已更新，正在同步 profile 插件（dsh-base / dsh-web-app）…')
         const bundles = await freshInstall.installProfileBundles({
-          nodeExe: findNodeExe(),
+          nodeExe: tcEnv.nodeExe || findNodeExe(),
           profileDir: p.profileDir,
           toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
           onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
@@ -2557,6 +2561,50 @@ function registerIpc() {
   // ---------------------------------------------------------------------------
   // 救援系统：每个终端独立 —— 救援点/诊断/排除都只作用于该终端自己的 profile 与日志
   // ---------------------------------------------------------------------------
+  // 对已接入的外部 DSH 做只读诊断探测：用 --dump-default-config 在不启动 Web 的情况下
+  // 尝试解析 profile/bundle/依赖，把 stderr 交给崩溃诊断。刚接入、从未经启动器启动的
+  // 坏 DSH 也能直接扫出问题，不需要先有一次“启动失败”的日志。
+  async function runDiagnosticProbe(terminalId, p) {
+    const nodeExe = findNodeExe()
+    if (!nodeExe || !p || !p.dshDir) return { ok: false, output: '' }
+    let cmdInfo = null
+    try { cmdInfo = dshCommand(p.dshDir) } catch { return { ok: false, output: '' } }
+    if (!cmdInfo || !cmdInfo.cli) return { ok: false, output: '' }
+    let toolchainEnv = null
+    try { toolchainEnv = await getToolchainEnv(terminalId) } catch { toolchainEnv = null }
+    const env = {
+      ...(toolchainEnv && toolchainEnv.env ? toolchainEnv.env : process.env),
+      DSH_HOME: p.home || '',
+    }
+    const profileName = p.terminal && p.terminal.profileName || 'web'
+    const args = cmdInfo.built
+      ? [cmdInfo.cli, '--profile', profileName, '--dump-default-config']
+      : ['--import', 'tsx/esm', cmdInfo.cli, '--profile', profileName, '--dump-default-config']
+    return new Promise(resolve => {
+      let child
+      try {
+        child = spawn(nodeExe, args, { cwd: p.dshDir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], shell: false })
+      } catch { return resolve({ ok: false, output: '' }) }
+      let stdout = ''
+      let stderr = ''
+      let settled = false
+      const done = (ok, output) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try { child.kill() } catch { /* 已退出 */ }
+        resolve({ ok, output })
+      }
+      const timer = setTimeout(() => done(false, '诊断探测超时（30 秒），已终止；通常是配置/依赖卡死'), 30000)
+      child.stdout.on('data', d => { stdout += String(d) })
+      child.stderr.on('data', d => { stderr += String(d) })
+      child.on('error', () => done(false, ''))
+      child.on('exit', code => {
+        const output = stderr || stdout
+        done(code === 0, output)
+      })
+    })
+  }
   const terminalRescueDir = (terminalId) => rescue.rescueDirFor(app.getPath('userData'), terminalId)
   const terminalProfileDir = (terminalId) => {
     const terminal = terminalRegistry.get(terminalId)
@@ -2609,7 +2657,7 @@ function registerIpc() {
     const start = await startTerminal(id)
     return ok({ restored: r.files }, start.ok ? '救援还原完成，DSH 已重启' : `救援还原完成，但重启失败：${start.message}`)
   })
-  ipcMain.handle('rescue:diagnose', (_e, terminalId) => {
+  ipcMain.handle('rescue:diagnose', async (_e, terminalId) => {
     const id = requireTerminalId(terminalId)
     if (!id) return { ok: false, message: '必须指定有效终端' }
     const rescueDir = terminalRescueDir(id)
@@ -2632,11 +2680,30 @@ function registerIpc() {
     const r = rescue.diagnoseCrash(recent)
     // 当前日志无新问题但有历史崩溃 → 附加历史供参考（source 标 last-crash 之前的记录）
     const result = { issues: r.issues, source: 'current-log' }
-    if (!r.issues.length && crash && crash.issues && crash.issues.length) {
+    // 刚接入的外部坏 DSH 往往没有启动器日志：直接对 dshDir 跑只读 --dump-default-config，
+    // 在不启动 Web 的情况下解析 profile/bundle/依赖，把真实报错交给同一套崩溃诊断。
+    let p = null
+    try { p = terminalPaths(id) } catch { p = null }
+    if (p && p.dshDir) {
+      const probe = await runDiagnosticProbe(id, p)
+      if (probe.ok === false && probe.output) {
+        const probeIssues = rescue.diagnoseCrash(probe.output).issues
+        const seen = new Set(result.issues.map(i => `${i.type}:${i.plugin}`))
+        for (const issue of probeIssues) {
+          const key = `${issue.type}:${issue.plugin}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            result.issues.push(issue)
+          }
+        }
+        if (probeIssues.length) result.source = 'current-log + diagnostic-probe'
+      }
+    }
+    if (!result.issues.length && crash && crash.issues && crash.issues.length) {
       result.lastCrash = crash
       result.message = '当前日志无崩溃,展示上一次崩溃记录(供参考)'
     }
-    return ok(result, result.message || (r.issues.length ? `检测到 ${r.issues.length} 个崩溃原因` : '未检测到已知崩溃原因'))
+    return ok(result, result.message || (result.issues.length ? `检测到 ${result.issues.length} 个崩溃原因` : '未检测到已知崩溃原因'))
   })
   ipcMain.handle('rescue:exclude', async (_e, terminalId, pluginName) => {
     const id = requireTerminalId(terminalId)

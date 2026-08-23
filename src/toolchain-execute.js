@@ -18,6 +18,15 @@ function expandExec(file, args) {
   return { file, args }
 }
 
+// .cjs/.mjs 文件不能直接作为 Windows 可执行文件 CreateProcess（Electron Node 20 抛 spawn UNKNOWN），
+// 统一转成 node <file> 组合。执行器携 env 均有 node 目录注入 PATH，"node" 可解析。
+function wrapJsFile(n) {
+  if (typeof n.file === 'string' && /\.(cjs|mjs)$/i.test(n.file)) {
+    return { file: 'node', args: [n.file, ...(n.args || [])] }
+  }
+  return n
+}
+
 // makeToolchainExecute(env) → fn
 // fn 兼容两种调用风格：
 //  - run 风格：fn(file, args, cwd, timeout[, envOverride])
@@ -25,7 +34,7 @@ function expandExec(file, args) {
 // file 可为字符串或 executablePnpm 返回的 { file, args } 对象。
 function makeToolchainExecute(env) {
   const execWithEnv = (file, args, cwd, timeout, envOverride) => {
-    const n = expandExec(file, args)
+    const n = wrapJsFile(expandExec(file, args))
     return new Promise(resolve => {
       execFile(n.file, n.args, {
         cwd,
@@ -50,7 +59,7 @@ function makeToolchainExecute(env) {
       const description = a1
       const onProgress = a5
       const timeout = a6 || 600000
-      const n = expandExec(a2, a3)
+      const n = wrapJsFile(expandExec(a2, a3))
       return new Promise(resolve => {
         const child = execFile(n.file, n.args, {
           cwd: a4,
@@ -91,4 +100,4 @@ function makeToolchainExecute(env) {
   return fn
 }
 
-module.exports = { makeToolchainExecute, expandExec }
+module.exports = { makeToolchainExecute, expandExec, wrapJsFile }

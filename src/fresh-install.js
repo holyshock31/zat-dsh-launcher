@@ -396,7 +396,7 @@ async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = 
   if (gitExe) extraDirs.push(path.dirname(gitExe))
   // npm 目录必须排最前（覆盖 node 发行版自带的旧 npm）；其后 node/pnpm/git/系统 PATH
   const env = { ...process.env, PATH: [...npmFirstDirs, ...extraDirs, process.env.PATH || ''].filter(Boolean).join(';') }
-  return { pnpmExe: pnpmExe || '', env }
+  return { pnpmExe: pnpmExe || '', nodeExe: nodePath, env }
 }
 
 // 定位 git：系统 PATH/常见位置优先；都没有时自举 PortableGit 到 toolsDir/git（幂等，已装则跳过）。
@@ -564,6 +564,14 @@ function executablePnpm(pnpmExe, nodeExe) {
     return null
   }
   return fs.existsSync(p) ? { file: p, args: [] } : null
+}
+
+// pnpm 参数归一化：调用方可能传 executablePnpm 对象、.exe 路径，或工具链自举返回的
+// 原始 .mjs/.cjs 路径。原始 JS 路径直接交给 execFile 会在 Electron Node 20 下同步抛
+// spawn UNKNOWN（不能作为可执行文件 CreateProcess），必须统一转成 node <cjs> 组合。
+function executablePnpmOrRaw(pnpmExe, nodeExe) {
+  if (pnpmExe && typeof pnpmExe === 'object' && typeof pnpmExe.file === 'string') return pnpmExe
+  return executablePnpm(pnpmExe || findPnpm(), nodeExe)
 }
 
 // ---------------------------------------------------------------------------
@@ -920,7 +928,7 @@ async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress
   // 显式传入的 pnpmExe（调用方工具链自举的）优先；没有才回退磁盘探测 + 自举。
   // ★ pnpm 是唯一可靠主路径（npm 对 dsh 依赖树解析性能崩塌，实测 7.5 分钟死转），
   //   自举失败也绝不直接掉进 npm——先尝试 ensurePnpm 自举一次（1.0.9 修复）。
-  let pnpmExeResolved = pnpmExe || executablePnpm(findPnpm(), nodeExe)
+  let pnpmExeResolved = executablePnpmOrRaw(pnpmExe, nodeExe)
   if (!pnpmExeResolved) {
     try {
       if (onProgress) onProgress('下载', '未找到 pnpm，正在自举（微秒级，仅首次）…')
@@ -959,7 +967,7 @@ async function updateNpmPackage({ nodeExe, targetDir, toolsDir, onProgress, exec
   const registry = await pickRegistry(nodeExe)
   // pnpm 三层保障（1.0.10）：调用方自举的 pnpmExe → 磁盘探测 → 自举；绝不裸探测失败即死
   // （同 installOfficialPackage，杜绝"工具链明明自举好却因探测差异找不到"）
-  let pnpm = pnpmExe || executablePnpm(findPnpm(), nodeExe)
+  let pnpm = executablePnpmOrRaw(pnpmExe, nodeExe)
   if (!pnpm) {
     try {
       if (onProgress) onProgress('更新', '未找到 pnpm，正在自举…')
@@ -1005,6 +1013,7 @@ module.exports = {
   ensureNpmCli, installOfficialPackage, updateNpmPackage, installProfileBundles,
   ensureNodeExe, findCachedNode, patchDshSubprocessNoWindow, ensureNpmCommand, ensureUpdateToolchain,
   findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole, normalToolsDir,
+  executablePnpmOrRaw,
   resolveLatestDshVersion,
   DSH_ORIGIN, DSH_NPM_PACKAGE, DSH_NPM_TAG, NPM_REGISTRIES, SOURCE_TIMEOUT_MS,
 }

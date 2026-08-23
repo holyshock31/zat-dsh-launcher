@@ -1,5 +1,5 @@
 {
-  "version": "1.0.13",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.0.13/ZAT-DSH-Launcher-Setup-1.0.13.exe",
-  "notes": "v1.0.13 全链路修复（16 项）：工具链自举的 pnpm 全链路真正可用（不再丢 pnpmExe）；源码形态缺依赖（tsx）自动恢复阶梯 L1/L2/L3 全部支持并自动安装；崩溃历史 24 小时后自动转当前日志（不再死挂旧问题旧按钮）；环境「一键修复」真正修复（Node 自举/Profile 初始化）；注册表删除冲突全局墓碑；hidden 控制台启动竞态修复（不会再误报启动失败）；会话 worker 防泄漏；atoack 救援点校验。"
+  "version": "1.2.0",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.2.0/ZAT-DSH启动器 Setup 1.2.0.exe",
+  "notes": "v1.2.0 修复：无系统 pnpm 的机器上，自举的 pnpm.mjs 被当可执行文件直接 spawn 导致安装秒败（spawn UNKNOWN）的通用问题；工具链执行器自动兜底；自举 nodeExe 全链路回传安装/更新/救援/启动；更新回退不再把 Electron 可执行文件当 Node 使用。"
 }

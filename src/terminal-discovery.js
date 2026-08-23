@@ -23,8 +23,78 @@ function normalizeNpmRoot(value) {
   return trimmed
 }
 
-// 严格校验 DSH 根目录，支持两种形态（返回 mode 供调用方区分）：
+// 判断 npm 包安装模式的子类型，供调用方区分 dshHome 归属：
+//  - npx：npm 缓存 _npx 目录（包在 AppData\Local\npm-cache\_npx\<hash>），官方 npx 方式
+//  - npm-standalone：全局 npm/pnpm 安装（包在 node_modules/@deepseek-ai/dsh，
+//    项目根没有 package.json 的独立安装）
+//  - npm：启动器一键安装的标准项目根（根有 package.json，profiles 就在其下）
+function classifyNpmMode(root, originalDir) {
+  const lowerRoot = root.toLowerCase()
+  // npx 缓存特征：路径含 \_npx\ 或 /_npx/
+  if (lowerRoot.includes('\\_npx\\') || lowerRoot.includes('/_npx/')) return 'npx'
+  // 从包根（node_modules/@deepseek-ai/dsh）归一化到项目根：检查项目根是否有 package.json。
+  // 没有则说明是全局安装的包管理前缀（如 %APPDATA%\npm），不是项目根。
+  if (originalDir && normalizeNpmRoot(originalDir) !== originalDir) {
+    if (!fs.existsSync(path.join(root, 'package.json'))) return 'npm-standalone'
+  }
+  return 'npm'
+}
+
+// 官方 npx / 全局 npm / pnpm 的落盘点：这些目录不在常规"主目录/盘符"扫描范围内，
+// 但恰恰是 README 首推方式（npx @deepseek-ai/dsh web）与常见全局安装的真实位置。
+function extraScanRoots() {
+  const roots = []
+  const home = os.homedir()
+  const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local')
+  const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming')
+  const pf = process.env.ProgramFiles || 'C:\\Program Files'
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+  const pushIfExists = (dir) => {
+    if (dir && fs.existsSync(dir)) roots.push(dir)
+  }
+  // npx 缓存：npm 常见 cache 位置
+  for (const cache of [path.join(local, 'npm-cache', '_npx'), path.join(roaming, 'npm-cache', '_npx'), path.join(home, '.npm', '_npx')]) {
+    if (!fs.existsSync(cache)) continue
+    try {
+      for (const name of fs.readdirSync(cache, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
+        const hashDir = path.join(cache, name)
+        roots.push(hashDir)
+        // 旧版 npx 布局兜底：直接给包根
+        const pkgDir = path.join(hashDir, 'node_modules', '@deepseek-ai', 'dsh')
+        if (fs.existsSync(pkgDir)) roots.push(pkgDir)
+      }
+    } catch { /* 缓存目录不可读则跳过 */ }
+  }
+  // 全局 npm：npm prefix 下的 node_modules/@deepseek-ai/dsh
+  for (const prefix of [path.join(roaming, 'npm'), path.join(local, 'npm'), path.join(pf, 'nodejs'), path.join(pf86, 'nodejs')]) {
+    pushIfExists(path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh'))
+    // 个别 npm 版本会直接把包展开在 prefix 下
+    pushIfExists(path.join(prefix, '@deepseek-ai', 'dsh'))
+  }
+  // 全局 pnpm：常见 prefix + global 目录，递归两层找 @deepseek-ai/dsh
+  for (const base of [path.join(local, 'pnpm'), path.join(roaming, 'pnpm'), path.join(home, '.pnpm')]) {
+    if (!fs.existsSync(base)) continue
+    pushIfExists(path.join(base, 'node_modules', '@deepseek-ai', 'dsh'))
+    const scan = (dir, depth) => {
+      if (depth > 2) return
+      let entries = []
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name === 'node_modules') continue
+        const full = path.join(dir, e.name)
+        pushIfExists(path.join(full, 'node_modules', '@deepseek-ai', 'dsh'))
+        scan(full, depth + 1)
+      }
+    }
+    scan(base, 0)
+  }
+  return roots
+}
+
+// 严格校验 DSH 根目录，支持多种形态（返回 mode 供调用方区分）：
 //  - source：源码仓库（根 package.json + apps/cli，name/workspaces 特征）
+//  - npx：npm 缓存 _npx 安装（包在 npx 缓存，dshHome 应为 ~/.dsh）
+//  - npm-standalone：全局安装或裸装（dshHome 应为 ~/.dsh）
 //  - npm：npm/pnpm 包安装形态（根 package.json 依赖 @deepseek-ai/dsh，
 //    node_modules 里有完整包结构；目录自身同时是 DSH_HOME，profiles 就在其下）
 function inspectDshDir(value) {
@@ -48,7 +118,11 @@ function inspectDshDir(value) {
     try {
       const pkg = JSON.parse(fs.readFileSync(npmPkgFile, 'utf8'))
       if (pkg.name !== '@deepseek-ai/dsh' || !pkg.bin || !pkg.bin.dsh) return null
-      return { dir, version: String(pkg.version || '未知'), name: path.basename(dir) || 'DeepSeek Harness', mode: 'npm' }
+      const mode = classifyNpmMode(dir, dir)
+      const displayName = mode === 'npx' || mode === 'npm-standalone'
+        ? `@deepseek-ai/dsh v${pkg.version || '未知'}`
+        : path.basename(dir) || 'DeepSeek Harness'
+      return { dir, version: String(pkg.version || '未知'), name: displayName, mode }
     } catch { return null }
   }
   // ★ npm 包根形态（1.0.10 修复）：传入目录本身是 @deepseek-ai/dsh 包根
@@ -60,7 +134,11 @@ function inspectDshDir(value) {
       const pkg = JSON.parse(fs.readFileSync(selfPkgFile, 'utf8'))
       if (pkg.name === '@deepseek-ai/dsh' && pkg.bin && pkg.bin.dsh) {
         const root = normalizeNpmRoot(dir)
-        return { dir: root, version: String(pkg.version || '未知'), name: path.basename(root) || 'DeepSeek Harness', mode: 'npm' }
+        const mode = classifyNpmMode(root, dir)
+        const displayName = mode === 'npx' || mode === 'npm-standalone'
+          ? `@deepseek-ai/dsh v${pkg.version || '未知'}`
+          : path.basename(root) || 'DeepSeek Harness'
+        return { dir: root, version: String(pkg.version || '未知'), name: displayName, mode }
       }
     } catch { /* 无效包 */ }
   }
@@ -143,9 +221,10 @@ function parseProcessEntry(line) {
 }
 
 // 从命令行提取 DSH 根目录与 --port 端口；命令行是相对路径（apps/cli）时用进程 cwd 补全根目录。
-// 支持两种形态：源码形态（apps\cli\...bin.js）与 npm 包形态（node_modules\@deepseek-ai\dsh\lib\bin.js）。
+// 支持三种形态：源码形态（apps\cli\...bin.js）、npm 包形态（node_modules\@deepseek-ai\dsh\lib\bin.js）、
+// npx 缓存形态（node_modules\@deepseek-ai\dsh\lib\bin.js，但路径在 _npx 缓存下）。
 // npm 包形态会把根目录归一化到项目根（剥掉 node_modules\@deepseek-ai\dsh 尾巴），
-// 因为项目根才是 DSH_HOME（profiles 就在项目根下）。
+// 因为项目根才是 DSH_HOME（profiles 就在项目根下）；npx 形态的 DSH_HOME 是 ~/.dsh。
 const NPM_PKG_MARKER = 'node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
 const NPM_PKG_TAIL = 'node_modules\\@deepseek-ai\\dsh'
 
@@ -178,7 +257,8 @@ function instanceFromCommandLine(commandLine, cwd) {
     const n = Number(match[1])
     if (Number.isSafeInteger(n) && n >= 1 && n <= 65535) port = n
   }
-  return { root, port, mode: isNpm ? 'npm' : 'source' }
+  const isNpx = isNpm && (root.toLowerCase().includes('\\_npx\\') || root.toLowerCase().includes('/_npx/'))
+  return { root, port, mode: isNpx ? 'npx' : isNpm ? 'npm' : 'source' }
 }
 
 // 兼容旧 API：返回根目录数组
@@ -207,7 +287,7 @@ function firstFreePortAvoiding(registeredPorts = [], reservedPorts = [], isPortF
   throw new Error('没有可用端口')
 }
 
-// 扫描本机 DSH：运行实例（优先）+ 常见位置 + 显式目录，结果去重。
+// 扫描本机 DSH：运行实例（优先）+ 常见位置 + 显式目录 + 官方 npx/全局安装位置，结果去重。
 // 常见位置 = 用户主目录一级 + 每个磁盘根目录一级，逐个做「内容识别」（inspectDshDir）。
 // 目录名不重要（源码形态惯例叫 deepseek-harness，npm 包形态可能叫任何名字，如 D:\2），
 // 只要里面是 DSH 程序就算。运行时枚举盘符，不含任何个人路径字面量，白板/隐私不受影响。
@@ -274,6 +354,8 @@ async function scanDshInstallations(options = {}) {
       }
     }
   } catch { /* 常见位置枚举失败不阻断 */ }
+  // 官方 npx/全局安装位置（不在主目录/盘符递归范围内，必须显式补扫）
+  if (scanDrives) for (const extra of extraScanRoots()) common.push(extra)
   const running = []
   for (const entry of entries) {
     const parsed = instanceFromCommandLine(entry.commandLine || '', entry.cwd)
@@ -321,4 +403,5 @@ module.exports = {
   findRegisteredByDshDir,
   firstFreePortAvoiding,
   scanDshInstallations,
+  extraScanRoots,
 }

@@ -279,3 +279,44 @@ test('scanDshInstallations 排除已识别 DSH 根的深层子目录', async () 
     assert.equal(path.resolve(results[0].dir).toLowerCase(), root.toLowerCase())
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
+
+// 1.0.14: official npx cache installs must be marked as npx so DSH_HOME resolves to ~/.dsh
+test('inspectDshDir identifies npx cache installs', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-npx-root-'))
+  const npxRoot = path.join(base, '_npx', 'hash123')
+  try {
+    const pkgDir = path.join(npxRoot, 'node_modules', '@deepseek-ai', 'dsh')
+    fs.mkdirSync(path.join(pkgDir, 'lib'), { recursive: true })
+    fs.writeFileSync(path.join(pkgDir, 'lib', 'bin.js'), 'console.log("dsh")\n')
+    fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.2', bin: { dsh: 'lib/bin.js' } }, null, 2))
+    fs.writeFileSync(path.join(npxRoot, 'package.json'), JSON.stringify({ dependencies: { '@deepseek-ai/dsh': '0.1.1-rc.2' } }, null, 2))
+    const r = inspectDshDir(npxRoot)
+    assert.ok(r, 'npx cache project root should be recognized')
+    assert.equal(r.mode, 'npx')
+    assert.equal(r.name, '@deepseek-ai/dsh v0.1.1-rc.2')
+  } finally { fs.rmSync(base, { recursive: true, force: true }) }
+})
+
+// 1.0.14: global npm installs (package under a prefix without root package.json) use ~/.dsh
+test('inspectDshDir identifies global npm installs', () => {
+  const prefix = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-global-'))
+  try {
+    const pkgDir = path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh')
+    fs.mkdirSync(path.join(pkgDir, 'lib'), { recursive: true })
+    fs.writeFileSync(path.join(pkgDir, 'lib', 'bin.js'), 'console.log("dsh")\n')
+    fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.2', bin: { dsh: 'lib/bin.js' } }, null, 2))
+    const r = inspectDshDir(pkgDir)
+    assert.ok(r, 'global package root should be recognized')
+    assert.equal(r.mode, 'npm-standalone')
+    assert.equal(path.resolve(r.dir).toLowerCase(), prefix.toLowerCase())
+  } finally { fs.rmSync(prefix, { recursive: true, force: true }) }
+})
+
+test('instanceFromCommandLine identifies npx cache processes', () => {
+  const cli = `"C:\\node\\node.exe" "C:\\Users\\foo\\AppData\\Local\\npm-cache\\_npx\\abc123\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js" web --port 3081`
+  assert.deepEqual(instanceFromCommandLine(cli), {
+    root: 'C:\\Users\\foo\\AppData\\Local\\npm-cache\\_npx\\abc123',
+    port: 3081,
+    mode: 'npx',
+  })
+})
