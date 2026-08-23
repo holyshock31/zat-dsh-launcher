@@ -10,6 +10,7 @@ const {
   ensurePnpm, findPnpm, pickRegistry,
   executablePnpmOrRaw,
   GIT_MIRRORS,
+  NPM_REGISTRIES,
 } = require('../src/fresh-install')
 const {
   detectEngine, downloadEngineTo, injectEngine, verifyEngine, restoreEngine, enginePatchBlock,
@@ -89,6 +90,13 @@ test('GIT_MIRRORS 提供多源回退，不依赖单一镜像可达', () => {
   assert.ok(GIT_MIRRORS.some(u => u.includes('ghfast.top')), '缺少 ghfast.top 镜像')
   assert.ok(GIT_MIRRORS.some(u => u.includes('ghproxy.net')), '缺少 ghproxy.net 镜像')
   assert.ok(GIT_MIRRORS.some(u => u.includes('gh.llkk.cc')), '缺少 gh.llkk.cc 镜像')
+})
+
+test('NPM_REGISTRIES 提供多 registry 回退，不依赖单一源可达', () => {
+  assert.ok(NPM_REGISTRIES.length >= 4, `应至少 4 个源，当前 ${NPM_REGISTRIES.length}`)
+  assert.ok(NPM_REGISTRIES.some(u => u.includes('npmmirror.com')), '缺少 npmmirror 镜像')
+  assert.ok(NPM_REGISTRIES.some(u => u.includes('mirrors.cloud.tencent.com')), '缺少腾讯 npm 镜像')
+  assert.ok(NPM_REGISTRIES.some(u => u.includes('mirrors.huaweicloud.com')), '缺少华为 npm 镜像')
 })
 
 test('executablePnpmOrRaw 归一化原始 .mjs/.cjs（spawn UNKNOWN 回归）', () => {

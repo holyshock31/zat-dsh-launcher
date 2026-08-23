@@ -120,9 +120,11 @@ test('netstat parser matches only the exact listening port and valid PID', () =>
 test('Harness update sources prefer official and include domestic fallbacks', () => {
   const sources = updateSources('https://github.com/deepseek-ai/deepseek-harness.git')
   assert.equal(sources[0], 'https://github.com/deepseek-ai/deepseek-harness.git')
-  assert.equal(sources.length, 3)
+  assert.equal(sources.length, 5)
   assert.ok(sources[1].includes('ghfast.top'))
   assert.ok(sources[2].includes('gh-proxy.com'))
+  assert.ok(sources[3].includes('ghproxy.net'))
+  assert.ok(sources[4].includes('gh.llkk.cc'))
 })
 
 test('Harness update check allows install when source has local changes (stash-backed)', async () => {

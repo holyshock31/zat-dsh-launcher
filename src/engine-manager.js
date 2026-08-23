@@ -65,6 +65,10 @@ const ENGINE_VERSION_SOURCES = [
   'https://ghfast.top/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/master/package.json',
   'https://gh-proxy.com/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/main/package.json',
   'https://gh-proxy.com/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/master/package.json',
+  'https://ghproxy.net/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/main/package.json',
+  'https://ghproxy.net/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/master/package.json',
+  'https://gh.llkk.cc/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/main/package.json',
+  'https://gh.llkk.cc/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-engine/master/package.json',
 ]
 
 // 探测远端引擎最新版本：逐个源 3 秒超时快速切换（直连 → 镜像），任一命中即返回。

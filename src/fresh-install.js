@@ -10,6 +10,7 @@ const os = require('node:os')
 const { execFile, spawn } = require('node:child_process')
 const { EventEmitter } = require('node:events')
 const { updateSources } = require('./harness-update')
+const { wrapJsFile } = require('./toolchain-execute')
 
 const DSH_ORIGIN = 'https://github.com/deepseek-ai/deepseek-harness.git'
 const DSH_NPM_PACKAGE = '@deepseek-ai/dsh'
@@ -19,8 +20,10 @@ const DSH_NPM_PACKAGE = '@deepseek-ai/dsh'
 // 用具体版本号安装（@deepseek-ai/dsh@0.1.0-rc.8），未来新 rc 自动跟随。
 const DSH_NPM_TAG = 'next'
 const NPM_REGISTRIES = [
-  'https://registry.npmjs.org/',
   'https://registry.npmmirror.com/',
+  'https://mirrors.cloud.tencent.com/npm/',
+  'https://mirrors.huaweicloud.com/repository/npm/',
+  'https://registry.npmjs.org/',
 ]
 const SOURCE_TIMEOUT_MS = 3000
 
@@ -37,9 +40,9 @@ function normalToolsDir() {
 // Node 24 无 shell 时 execFile(.cmd) 直接 EINVAL，pnpm 一律用 node <cjs> / .exe 形态。
 function normalizeExec(file, args) {
   if (file && typeof file === 'object' && typeof file.file === 'string') {
-    return { file: file.file, args: [...(file.args || []), ...args] }
+    return wrapJsFile({ file: file.file, args: [...(file.args || []), ...args] })
   }
-  return { file, args }
+  return wrapJsFile({ file, args })
 }
 
 function run(file, args, cwd, timeout = 120000, env) {
@@ -303,7 +306,7 @@ async function pickRegistry(nodeExe, execute = run) {
   const bin = nodeExe || process.execPath
   // 镜像优先（1.0.9 修复）：国内用户直连 npmjs 慢/断，npmmirror 快且稳；
   // 官方源仅作为镜像不可用时的兜底（先测镜像，再测官方）。
-  for (const url of ['https://registry.npmmirror.com/', 'https://registry.npmjs.org/']) {
+  for (const url of NPM_REGISTRIES) {
     const r = await execute(bin, ['-e', probe, url], null, 5000)
     if (r.ok && r.code === 0) return url
   }
@@ -509,7 +512,7 @@ async function ensureNodeExe({ nodeExe, toolsDir, onProgress, execute = runWithP
     return { ok: true, nodeExe: cached, downloaded: false }
   }
   const versions = ['v22.19.0', 'v24.4.0', 'v22.20.0'] // 全部满足 DSH engines: ^22.19.0 || >=24.0.0
-  const bases = ['https://nodejs.org/dist', 'https://npmmirror.com/mirrors/node']
+  const bases = ['https://nodejs.org/dist', 'https://npmmirror.com/mirrors/node', 'https://mirrors.huaweicloud.com/nodejs', 'https://mirrors.aliyun.com/nodejs-release']
   let lastErr = ''
   for (const version of versions) {
     for (const base of bases) {

@@ -19,7 +19,7 @@ const { execFile } = require('node:child_process')
  *    失败再分步 build:lib / build:web，最后兜底 pnpm run build（兼容旧版构建）。
  *  - 任何失败都回滚 git 到旧提交并返回完整错误尾部，绝不留下半更新状态。 */
 
-const NPM_REGISTRIES = ['https://registry.npmjs.org/', 'https://registry.npmmirror.com/']
+const NPM_REGISTRIES = ['https://registry.npmmirror.com/', 'https://mirrors.cloud.tencent.com/npm/', 'https://mirrors.huaweicloud.com/repository/npm/', 'https://registry.npmjs.org/']
 
 const { expandExec, wrapJsFile } = require('./toolchain-execute')
 
@@ -213,6 +213,8 @@ function updateSources(origin) {
     official,
     `https://ghfast.top/${official}`,
     `https://gh-proxy.com/${official}`,
+    `https://ghproxy.net/${official}`,
+    `https://gh.llkk.cc/${official}`,
   ]
 }
 

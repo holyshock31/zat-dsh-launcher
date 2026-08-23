@@ -974,16 +974,16 @@ async function installSourceDeps(terminalId, p) {
 // 用 node 直接跑 harness 的 CLI（无需 pnpm）。
 // 支持三种形态：npm 预构建包（node_modules/@deepseek-ai/dsh/lib/bin.js）、
 // 源码树构建产物（apps/cli/lib/bin.js）、源码树源码模式（apps/cli/src/bin.ts + tsx）。
-function dshCommand(dshDir) {
-  const nodeExe = findNodeExe()
+function dshCommand(dshDir, nodeExe) {
+  const resolvedNode = nodeExe || findNodeExe()
   // npm 发行包形态：dshDir 本身就是包根，bin.js 位于 dshDir/lib/bin.js。
   const pkgBin = path.join(dshDir, 'lib', 'bin.js')
-  if (fs.existsSync(pkgBin)) return { nodeExe, cli: pkgBin, built: true }
+  if (fs.existsSync(pkgBin)) return { nodeExe: resolvedNode, cli: pkgBin, built: true }
   // 兼容旧布局：安装根 node_modules/@deepseek-ai/dsh/lib/bin.js
   const npmPkgCli = path.join(dshDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-  if (fs.existsSync(npmPkgCli)) return { nodeExe, cli: npmPkgCli, built: true }
+  if (fs.existsSync(npmPkgCli)) return { nodeExe: resolvedNode, cli: npmPkgCli, built: true }
   const builtCli = path.join(dshDir, 'apps', 'cli', 'lib', 'bin.js')
-  if (fs.existsSync(builtCli)) return { nodeExe, cli: builtCli, built: true }
+  if (fs.existsSync(builtCli)) return { nodeExe: resolvedNode, cli: builtCli, built: true }
   // 源码模式（apps/cli/src/bin.ts + tsx）：需要 tsx 才能跑。检测依赖缺失：
   // 克隆源码后未 pnpm install 会报 "Cannot find package 'tsx'"（用户反馈）。
   // ★ 1.0.13：检测覆盖 pnpm 11 虚拟 store 布局（.pnpm/tsx@x/node_modules/tsx），
@@ -1005,11 +1005,11 @@ function dshCommand(dshDir) {
       })()
     depsMissing = !hasTsx
   }
-  return { nodeExe, cli: srcCli, built: false, depsMissing }
+  return { nodeExe: resolvedNode, cli: srcCli, built: false, depsMissing }
 }
 
-function spawnDshArgs(args, dshDir, envObj, toolchainEnv) {
-  const { nodeExe, cli, built } = dshCommand(dshDir)
+function spawnDshArgs(args, dshDir, envObj, toolchainEnv, nodeExe) {
+  const { nodeExe: cmdNode, cli, built } = dshCommand(dshDir, nodeExe)
   // 白板原则：DSH 进程环境 = 启动器自带工具链（node/pnpm/npm 目录注入 PATH），
   // 机器上预装什么都不依赖；DSH 内部所有 subprocess 调用都走启动器自带的。
   const childEnv = toolchainEnv && typeof toolchainEnv === 'object' ? { ...toolchainEnv } : { ...process.env }
@@ -1021,7 +1021,7 @@ function spawnDshArgs(args, dshDir, envObj, toolchainEnv) {
     if (fs.existsSync(sharedPnpm)) childEnv.PNPM_MJS = sharedPnpm
   } catch { /* 注入失败不影响启动 */ }
   return {
-    file: nodeExe,
+    file: cmdNode,
     args: built ? [cli, ...args] : ['--import', 'tsx/esm', cli, ...args],
     cwd: dshDir,
     env: childEnv,
@@ -1075,7 +1075,7 @@ async function execDsh(args, opts = {}) {
       }
     } catch { /* 注入失败则用系统环境 */ }
   }
-  const { file, args: fullArgs, cwd, env } = spawnDshArgs(args, p.dshDir, currentEnvObj(), toolchainEnv)
+  const { file, args: fullArgs, cwd, env } = spawnDshArgs(args, p.dshDir, currentEnvObj(), toolchainEnv, (toolchainEnvCache && toolchainEnvCache.nodeExe) || undefined)
   const timeoutMs = opts.timeout || 120000
   // 根修弹窗：内部 dsh CLI 调用也用隐藏控制台启动（不再弹窗口）
   let child
@@ -1291,7 +1291,7 @@ async function startTerminal(terminalId, startOptions = {}) {
       pushTerminalLog(terminalId, 'error', `源码依赖自动安装异常：${friendlyError(e)}`)
     }
   }
-  const { file, args, cwd, env } = spawnDshArgs(webArgs, p.dshDir, p.terminal, toolchainEnv && toolchainEnv.env || undefined)
+  const { file, args, cwd, env } = spawnDshArgs(webArgs, p.dshDir, p.terminal, toolchainEnv && toolchainEnv.env || undefined, (toolchainEnv && toolchainEnv.nodeExe) || undefined)
   // 根修弹窗：启动器无控制台 GUI 直接 spawn 控制台程序会让 Windows 给每个子进程开新可见窗口。
   // 用隐藏控制台启动 DSH（CREATE_NEW_CONSOLE + SW_HIDE），DSH 及其所有子进程继承同一隐藏控制台，
   // 与官方终端启动等效，弹窗从根上消失。失败时自动退回普通 spawn（保底可用）。
@@ -2255,8 +2255,9 @@ function registerIpc() {
     // ★ 1.0.13：git 形态更新检查必须走工具链 execute（自举 git），
     //   旧实现传 undefined → 默认 run（系统 git）→ 无系统 git 的机器检查永远失败。
     let execute = undefined
-    try { execute = makeToolchainExecute((await getToolchainEnv(id)).env) } catch { /* 工具链失败时用默认（系统 git 兜底） */ }
-    return checkHarnessUpdate(terminalPaths(id).dshDir, execute, harnessUpdate.npmLatestProbe(findNodeExe()))
+    let tcEnv = null
+    try { tcEnv = await getToolchainEnv(id); execute = makeToolchainExecute(tcEnv.env) } catch { /* 工具链失败时用默认（系统 git 兜底） */ }
+    return checkHarnessUpdate(terminalPaths(id).dshDir, execute, harnessUpdate.npmLatestProbe((tcEnv && tcEnv.nodeExe) || findNodeExe()))
   })
   ipcMain.handle('harness:install-update', async (_e, terminalId) => {
     const id = requireTerminalId(terminalId)
@@ -2340,6 +2341,8 @@ function registerIpc() {
           'https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
           'https://cdn.jsdelivr.net/gh/mishibeikejie/zat-dsh-launcher@main/launcher-version.json',
           'https://ghfast.top/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
+          'https://ghproxy.net/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
+          'https://gh.llkk.cc/https://raw.githubusercontent.com/mishibeikejie/zat-dsh-launcher/main/launcher-version.json',
         ]
       }
       let data = null
@@ -2565,13 +2568,14 @@ function registerIpc() {
   // 尝试解析 profile/bundle/依赖，把 stderr 交给崩溃诊断。刚接入、从未经启动器启动的
   // 坏 DSH 也能直接扫出问题，不需要先有一次“启动失败”的日志。
   async function runDiagnosticProbe(terminalId, p) {
-    const nodeExe = findNodeExe()
-    if (!nodeExe || !p || !p.dshDir) return { ok: false, output: '' }
-    let cmdInfo = null
-    try { cmdInfo = dshCommand(p.dshDir) } catch { return { ok: false, output: '' } }
-    if (!cmdInfo || !cmdInfo.cli) return { ok: false, output: '' }
+    if (!p || !p.dshDir) return { ok: false, output: '' }
     let toolchainEnv = null
     try { toolchainEnv = await getToolchainEnv(terminalId) } catch { toolchainEnv = null }
+    const nodeExe = (toolchainEnv && toolchainEnv.nodeExe) || findNodeExe()
+    if (!nodeExe) return { ok: false, output: '' }
+    let cmdInfo = null
+    try { cmdInfo = dshCommand(p.dshDir, nodeExe) } catch { return { ok: false, output: '' } }
+    if (!cmdInfo || !cmdInfo.cli) return { ok: false, output: '' }
     const env = {
       ...(toolchainEnv && toolchainEnv.env ? toolchainEnv.env : process.env),
       DSH_HOME: p.home || '',
@@ -2731,7 +2735,7 @@ function registerIpc() {
     const tcEnv = await getToolchainEnv(id)
     const updateExecute = makeToolchainExecute(tcEnv.env)
     const bundles = await freshInstall.installProfileBundles({
-      nodeExe: findNodeExe(),
+      nodeExe: tcEnv.nodeExe || findNodeExe(),
       profileDir: p.profileDir,
       toolsDir: path.join(freshInstall.normalToolsDir(), 'zat-tools'),
       onProgress: (stage, message) => pushTerminalLog(id, 'info', `[${stage}] ${message}`),
