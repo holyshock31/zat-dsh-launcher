@@ -9,6 +9,7 @@ const {
   probeSource, reachableSource, downloadDshTo,
   ensurePnpm, findPnpm, pickRegistry,
   executablePnpmOrRaw,
+  GIT_MIRRORS,
 } = require('../src/fresh-install')
 const {
   detectEngine, downloadEngineTo, injectEngine, verifyEngine, restoreEngine, enginePatchBlock,
@@ -81,6 +82,13 @@ test('ensurePnpm 缓存 exists 时直接返回（内置 pnpm 单文件）', asyn
 
 test('findPnpm 返回字符串（不抛错）', () => {
   assert.equal(typeof findPnpm(), 'string')
+})
+
+test('GIT_MIRRORS 提供多源回退，不依赖单一镜像可达', () => {
+  assert.ok(GIT_MIRRORS.length >= 5, `应至少 5 个源，当前 ${GIT_MIRRORS.length}`)
+  assert.ok(GIT_MIRRORS.some(u => u.includes('ghfast.top')), '缺少 ghfast.top 镜像')
+  assert.ok(GIT_MIRRORS.some(u => u.includes('ghproxy.net')), '缺少 ghproxy.net 镜像')
+  assert.ok(GIT_MIRRORS.some(u => u.includes('gh.llkk.cc')), '缺少 gh.llkk.cc 镜像')
 })
 
 test('executablePnpmOrRaw 归一化原始 .mjs/.cjs（spawn UNKNOWN 回归）', () => {

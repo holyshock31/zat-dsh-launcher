@@ -404,7 +404,10 @@ async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = 
 const GIT_MIRRORS = [
   'https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
   'https://ghfast.top/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
+  'https://ghproxy.net/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
+  'https://gh.llkk.cc/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
   'https://gh-proxy.com/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
+  'https://ghproxy.com/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
 ]
 
 function findSystemGit() {
@@ -441,7 +444,7 @@ async function ensureGit({ toolsDir, onProgress, execute = run }) {
       if (onProgress) onProgress('git', `下载 PortableGit（${i + 1}/${GIT_MIRRORS.length}：${url.slice(0, 60)}…）`)
       const pkg = path.join(dir, `portable-git-${i}.7z.exe`)
       const r = await downloadFileNative(url, pkg, onProgress)
-      if (!r.ok || !fs.existsSync(pkg) || fs.statSync(pkg).size < 1000000) { fs.rmSync(pkg, { force: true }); lastErr = `源 ${i + 1} 下载失败`; continue }
+      if (!r.ok || !fs.existsSync(pkg) || fs.statSync(pkg).size < 1000000) { fs.rmSync(pkg, { force: true }); lastErr = `源 ${i + 1} 下载失败（${r.err || '无输出'}）`; continue }
       if (onProgress) onProgress('git', '解压 PortableGit（自解压，约 1-2 分钟）…')
       const ex = await run(pkg, ['-y', '-gm2', `-o"${gitDir}"`], dir, 10 * 60 * 1000)
       fs.rmSync(pkg, { force: true })
@@ -1013,6 +1016,7 @@ module.exports = {
   ensureNpmCli, installOfficialPackage, updateNpmPackage, installProfileBundles,
   ensureNodeExe, findCachedNode, patchDshSubprocessNoWindow, ensureNpmCommand, ensureUpdateToolchain,
   findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole, normalToolsDir,
+  GIT_MIRRORS,
   executablePnpmOrRaw,
   resolveLatestDshVersion,
   DSH_ORIGIN, DSH_NPM_PACKAGE, DSH_NPM_TAG, NPM_REGISTRIES, SOURCE_TIMEOUT_MS,
