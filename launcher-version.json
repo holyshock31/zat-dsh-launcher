@@ -1,5 +1,5 @@
 {
   "version": "1.2.0",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.2.0/ZAT-DSH启动器 Setup 1.2.0.exe",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.2.0/ZAT-DSH.Setup.1.2.0.exe",
   "notes": "v1.2.0 修复：无系统 pnpm 的机器上，自举的 pnpm.mjs 被当可执行文件直接 spawn 导致安装秒败（spawn UNKNOWN）的通用问题；工具链执行器自动兜底；自举 nodeExe 全链路回传安装/更新/救援/启动；更新回退不再把 Electron 可执行文件当 Node 使用。"
 }
