@@ -1,5 +1,5 @@
 {
-  "version": "1.2.1",
-  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.2.1/ZAT-DSH-Launcher-Setup-1.2.1.exe",
-  "notes": "v1.2.1 修复：PortableGit 自举改为多源轮询，不再依赖单一镜像可达；DSH/引擎/Harness 克隆源、引擎版本探测、启动器自更新、npm registry、Node 下载源全部扩充多源回退；安装/更新/救援/启动链路统一使用工具链自举的 nodeExe；fresh-install 执行器补上 .mjs/.cjs 自动转 node <file> 兜底。"
+  "version": "1.2.2",
+  "url": "https://github.com/mishibeikejie/zat-dsh-launcher/releases/download/v1.2.2/ZAT-DSH-Launcher-Setup-1.2.2.exe",
+  "notes": "v1.2.2 修复：一键扫描补上 dsh 命令、npm/pnpm 全局安装、DSH_HOME 识别；手动接入不再要求用户选中的目录本身就是根目录，会在所选目录内自动递归查找 DSH；兼容官方 npx @deepseek-ai/dsh web 的无项目根安装方式。"
 }
