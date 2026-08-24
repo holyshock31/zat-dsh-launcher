@@ -13,12 +13,19 @@
     "start": "node scripts/make-icon.js && electron .",
     "dev": "node scripts/make-icon.js && electron .",
     "dist": "node scripts/make-icon.js && electron-builder && node scripts/clean-dist.cjs",
+    "dist:mac": "node scripts/make-icon.js && electron-builder --mac && node scripts/clean-dist.cjs",
+    "dist:win": "node scripts/make-icon.js && electron-builder --win --x64 && node scripts/clean-dist.cjs",
     "pack:dir": "node scripts/make-icon.js && electron-builder --dir"
   },
   "devDependencies": {
     "@electron/fuses": "^2.1.3",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
   },
   "build": {
     "appId": "com.zat.dsh-launcher",
@@ -53,6 +60,15 @@
         }
       ],
       "icon": "assets/icon.png"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/icon.png",
+      "artifactName": "${productName}-${version}-${arch}-mac.${ext}"
     },
     "nsis": {
       "oneClick": false,

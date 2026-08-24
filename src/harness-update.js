@@ -22,6 +22,7 @@ const { execFile } = require('node:child_process')
 const NPM_REGISTRIES = ['https://registry.npmmirror.com/', 'https://mirrors.cloud.tencent.com/npm/', 'https://mirrors.huaweicloud.com/repository/npm/', 'https://registry.npmjs.org/']
 
 const { expandExec, wrapJsFile } = require('./toolchain-execute')
+const { mergePath } = require('./platform-runtime')
 
 function run(file, args, cwd, timeout = 120000) {
   return new Promise(resolve => {
@@ -36,7 +37,7 @@ function run(file, args, cwd, timeout = 120000) {
 function findNpmCli(env) {
   const candidates = []
   const pathValue = String((env && env.PATH) || process.env.PATH || '')
-  for (const d of pathValue.split(';')) {
+  for (const d of pathValue.split(path.delimiter)) {
     const dir = String(d || '').trim()
     if (!dir) continue
     candidates.push(path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'))
@@ -91,7 +92,7 @@ async function runBuild(dshDir, execute, env, pnpmExe, onStep) {
     const d = path.dirname(String(pnpmFile).replace(/\.cmd$/i, ''))
     if (d && d !== '.') extraPath.push(d)
   }
-  const buildEnv = { ...(env || process.env), PATH: [...extraPath, String((env && env.PATH) || process.env.PATH || '')].filter(Boolean).join(';') }
+  const buildEnv = { ...(env || process.env), PATH: mergePath(extraPath, String((env && env.PATH) || process.env.PATH || '')) }
   const runNpm = (script) => npmCli
     ? execute(nodeFile, [npmCli, 'run', script], dshDir, 25 * 60 * 1000, buildEnv)
     // 无自举 npm-cli 时让系统 PATH 解析 npm（'npm.cmd' 字面量在 Node 24 无 shell 会 EINVAL）

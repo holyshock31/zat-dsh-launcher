@@ -11,7 +11,7 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const { TerminalRegistry } = require('./src/terminal-registry')
 const { TerminalSupervisor, probePort } = require('./src/terminal-supervisor')
-const { parseNetstatListeningPids } = require('./src/windows-process')
+const platformRuntime = require('./src/platform-runtime')
 const harnessUpdate = require('./src/harness-update')
 const { localInfo: harnessLocalInfo, checkUpdate: checkHarnessUpdate, installUpdate: installHarnessUpdate } = harnessUpdate
 const { inspectDshDir, scanDshInstallations, normalizeDshPath, normalizeNpmRoot, findRegisteredByDshDir, processEntries } = require('./src/terminal-discovery')
@@ -808,62 +808,11 @@ function makeToolchainExecute(env) {
 
 // Node 版本必须满足 DSH 要求（package.json engines: ^22.19.0 || >=24.0.0），不满足视为不可用
 function nodeSatisfiesDsh(versionText) {
-  const m = String(versionText || '').match(/v?(\d+)\.(\d+)\.(\d+)/)
-  if (!m) return false
-  const major = Number(m[1])
-  const minor = Number(m[2])
-  if (major === 22) return minor >= 19
-  if (major >= 24) return true
-  return false
+  return platformRuntime.nodeSatisfiesDsh(versionText)
 }
 
 function findNodeExe() {
-  const candidates = [
-    process.env.DSH_NODE_EXE,
-    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs', 'node.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'nodejs', 'node.exe'),
-    'node',
-  ]
-  // 常见开发工具自带的 node（runtime 缓存目录），递归探测不硬编码个人路径。
-  // 例：~/.cache/<tool-runtime>/dependencies/node/bin/node.exe
-  const findUnderCache = (dir, depth) => {
-    if (depth > 5) return null
-    for (const sub of ['bin/node.exe', 'node/bin/node.exe', 'dependencies/node/bin/node.exe']) {
-      const p = path.join(dir, sub)
-      if (fs.existsSync(p)) return p
-    }
-    let entries
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return null }
-    for (const ent of entries) {
-      if (!ent.isDirectory() || ent.name === 'node_modules' || ent.name.startsWith('.')) continue
-      const r = findUnderCache(path.join(dir, ent.name), depth + 1)
-      if (r) return r
-    }
-    return null
-  }
-  try {
-    const homeCache = path.join(os.homedir(), '.cache')
-    if (fs.existsSync(homeCache)) {
-      const cached = findUnderCache(homeCache, 0)
-      if (cached) candidates.push(cached)
-    }
-  } catch { /* 缓存目录不可读则跳过 */ }
-  for (const c of candidates) {
-    if (!c) continue
-    try {
-      if (c === 'node') {
-        // 只有真实能跑且版本满足 DSH 要求的 node 才算数（DSH engines: ^22.19.0 || >=24.0.0）
-        const r = require('node:child_process').execFileSync('node', ['-v'], { stdio: 'pipe', timeout: 5000 })
-        if (r && nodeSatisfiesDsh(String(r))) return 'node'
-      } else if (fs.existsSync(c)) {
-        try {
-          const r = require('node:child_process').execFileSync(c, ['-v'], { stdio: 'pipe', timeout: 5000 })
-          if (r && nodeSatisfiesDsh(String(r))) return c
-        } catch { /* 版本校验失败，继续找下一个 */ }
-      }
-    } catch { /* 继续尝试 */ }
-  }
-  return '' // 没有可用的 node：如实返回空，由调用方给出明确提示
+  return platformRuntime.findNodeExe()
 }
 
 // 崩溃自动恢复阶梯执行器（1.0.6）：按级别执行对应恢复动作，返回 true = 本级完成可重启。
@@ -881,6 +830,14 @@ async function runAutoFixLevel(terminalId, p, issue, level) {
         const r = rescue.restoreRescueSnapshot(p.profileDir, rescueDir)
         if (r.ok) { logStep(`已还原救援点配置（${r.files.join('、')}）`); return true }
         logStep(`还原救援点失败：${r.message}`); return false
+      }
+      if (issue.type === 'legacy-credentials') {
+        const r = rescue.migrateLegacyCredentials(resolveHome(p.terminal && p.terminal.dshHome))
+        if (r.ok) {
+          logStep(r.migrated ? `旧版凭据格式已安全迁移（备份：${r.backupFile}）` : '凭据文件已是新格式，无需迁移')
+          return true
+        }
+        logStep(`旧版凭据迁移失败：${r.message}`); return false
       }
       if (issue.type === 'source-deps') {
         // ★ 1.0.13：源码形态缺 devDependency（tsx）——装源码树依赖,不是 profile bundle
@@ -996,6 +953,7 @@ function dshCommand(dshDir, nodeExe) {
       fs.existsSync(path.join(dshDir, 'node_modules', '.pnpm', 'node_modules', 'tsx')) ||
       // pnpm 11：.pnpm/tsx@<ver>/node_modules/tsx（扫描任意 tsx@* 目录）
       fs.existsSync(path.join(dshDir, 'node_modules', '.bin', 'tsx.cmd')) ||
+      fs.existsSync(path.join(dshDir, 'node_modules', '.bin', 'tsx')) ||
       (() => {
         try {
           const pnpm = path.join(dshDir, 'node_modules', '.pnpm')
@@ -1014,6 +972,8 @@ function spawnDshArgs(args, dshDir, envObj, toolchainEnv, nodeExe) {
   // 机器上预装什么都不依赖；DSH 内部所有 subprocess 调用都走启动器自带的。
   const childEnv = toolchainEnv && typeof toolchainEnv === 'object' ? { ...toolchainEnv } : { ...process.env }
   childEnv.DSH_HOME = envObj.dshHome && envObj.dshHome.trim() ? envObj.dshHome.trim() : ''
+  if (cmdNode) childEnv.DSH_NODE_EXE = cmdNode
+  if (cmdNode && cmdNode !== 'node') childEnv.PATH = platformRuntime.mergePath([path.dirname(cmdNode)], childEnv.PATH || '')
   // 与插件市场共享工具：把自举的 pnpm 位置通过 PNPM_MJS 注入 DSH 环境，
   // 市场探测到直接用启动器装好的 pnpm（不重复下载）。长路径 + .mjs（内置单文件形态）。
   try {
@@ -1033,19 +993,11 @@ function tcpPortInUse(port) {
 }
 
 function listPortPids(port) {
-  return new Promise((resolve) => {
-    execFile('netstat', ['-ano', '-p', 'tcp'], { windowsHide: true }, (err, stdout) => {
-      if (err) return resolve([])
-      resolve(parseNetstatListeningPids(stdout, port))
-    })
-  })
+  return platformRuntime.listPortPids(port)
 }
 
 function killPid(pid) {
-  return new Promise((resolve) => {
-    if (!Number.isSafeInteger(Number(pid)) || Number(pid) <= 0) return resolve(false)
-    execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true }, error => resolve(!error))
-  })
+  return platformRuntime.killPidTree(pid)
 }
 
 // 复制目录树（robocopy，可排除子目录；源保持只读不修改）
@@ -1071,7 +1023,7 @@ async function execDsh(args, opts = {}) {
       const nodeExe = findNodeExe()
       if (nodeExe) {
         const dirs = [path.dirname(nodeExe), path.join(freshInstall.normalToolsDir(), 'zat-tools')]
-        toolchainEnv = { ...process.env, PATH: [...dirs, process.env.PATH || ''].filter(Boolean).join(';') }
+        toolchainEnv = { ...process.env, PATH: platformRuntime.mergePath(dirs, process.env.PATH || '') }
       }
     } catch { /* 注入失败则用系统环境 */ }
   }
@@ -1170,14 +1122,27 @@ async function startTerminal(terminalId, startOptions = {}) {
   if (!nodeInfo.ok) return { ok: false, message: nodeInfo.message }
   const ensuredNode = nodeInfo.nodeExe
 
+  // DSH credentials-local 新版不再接受 {version, refs} 包装。启动前做保守迁移：
+  // 仅命中严格旧结构时修改，并保留 0600 原文件备份；未知结构直接中止，绝不冒险改凭据。
+  const credentialsMigration = rescue.migrateLegacyCredentials(resolveHome(p.terminal.dshHome))
+  if (!credentialsMigration.ok) {
+    pushTerminalLog(terminalId, 'error', credentialsMigration.message)
+    return { ok: false, message: credentialsMigration.message }
+  }
+  if (credentialsMigration.migrated) {
+    pushTerminalLog(terminalId, 'info', `已迁移旧版 credentials.yaml；原文件备份：${credentialsMigration.backupFile}`)
+  }
+
   // 启动前自动打"无窗口"补丁（从根上解决弹窗，覆盖任何形态的 DSH——一键安装/手动接入/源码版）：
   // ① DSH 的 subprocess-local（child_process.spawn 加 windowsHide，杜绝 curl/git/powershell 弹窗）
   // ② zat-dsh-engine 的 spawnShell（powershell 加 -WindowStyle Hidden）
-  try {
-    freshInstall.patchDshSubprocessNoWindow(p.dshDir)
-    const engineDir = path.join(p.profileDir, 'node_modules', 'zat-dsh-engine')
-    if (fs.existsSync(path.join(engineDir, 'lib', 'index.js'))) engineManager.patchEngineNoWindow(engineDir)
-  } catch { /* 补丁失败不阻断启动 */ }
+  if (process.platform === 'win32') {
+    try {
+      freshInstall.patchDshSubprocessNoWindow(p.dshDir)
+      const engineDir = path.join(p.profileDir, 'node_modules', 'zat-dsh-engine')
+      if (fs.existsSync(path.join(engineDir, 'lib', 'index.js'))) engineManager.patchEngineNoWindow(engineDir)
+    } catch { /* 补丁失败不阻断启动 */ }
+  }
 
   // 与插件市场共享工具：确保 %TEMP%\zat-tools 有 pnpm.cjs（市场探测位），启动器装的市场直接复用。
   // 有全局 pnpm.cjs 就复制一份过去；没有则自举到共享目录——无论哪种，zat-tools 里始终有。
@@ -1299,7 +1264,9 @@ async function startTerminal(terminalId, startOptions = {}) {
   try {
     const hidden = await freshInstall.spawnWithHiddenConsole(file, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
     child = hidden.child
-    pushTerminalLog(terminalId, 'info', hidden.hiddenConsole ? '已用隐藏控制台启动（子进程不再弹窗）' : '（隐藏控制台不可用，退回普通启动）')
+    pushTerminalLog(terminalId, 'info', process.platform === 'win32'
+      ? (hidden.hiddenConsole ? '已用隐藏控制台启动（子进程不再弹窗）' : '（隐藏控制台不可用，退回普通启动）')
+      : '已使用 macOS 后台进程方式启动')
   } catch {
     child = spawn(file, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: true })
   }
@@ -1852,20 +1819,14 @@ async function fastDelete(p, onProgress, concurrency = 300) {
   return { ok: !fs.existsSync(p), files: total, remain: failed }
 }
 
-// 删除前清杀仍持有目标目录句柄的进程（DSH 停止后子进程可能短暂残留）。
-// 用 PowerShell 一次枚举全部进程命令行（比逐进程读 PEB 快且全），匹配即杀进程树。
+// 删除前清杀仍持有目标目录句柄的 DSH 进程（DSH 停止后子进程可能短暂残留）。
+// 复用平台进程枚举，只匹配命令行含目标根路径的 DSH，避免碰到无关进程。
 async function killProcessesUsing(roots) {
   try {
-    const r = await new Promise(resolve => {
-      const ps = 'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | ForEach-Object { "$($_.ProcessId)|$($_.CommandLine)" }'
-      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 6000 }, (error, stdout) => resolve({ ok: !error, out: String(stdout || '') }))
-    })
-    if (!r.ok) return
-    for (const line of r.out.split(/\r?\n/)) {
-      const idx = line.indexOf('|')
-      if (idx <= 0) continue
-      const pid = Number(line.slice(0, idx))
-      const cmd = line.slice(idx + 1)
+    const entries = await processEntries()
+    for (const entry of entries) {
+      const pid = Number(entry.pid)
+      const cmd = String(entry.commandLine || '')
       if (!cmd) continue
       if (roots.some(root => root && cmd.includes(root))) {
         try { await killPid(pid) } catch { /* 忽略 */ }
@@ -1993,7 +1954,7 @@ async function runPendingDeleteRound() {
       try { await killProcessesUsing([item.path]) } catch { /* 忽略 */ }
       await new Promise(r => setTimeout(r, 800))
       try { await fsp.rm(item.path, { recursive: true, force: true }) } catch { /* 交 cmd 兜底 */ }
-      if (fs.existsSync(item.path)) {
+      if (process.platform === 'win32' && fs.existsSync(item.path)) {
         try { await new Promise(resolve => execFile('cmd.exe', ['/c', 'rd', '/s', '/q', `"${item.path}"`], { windowsHide: true, timeout: 30000 }, () => resolve())) } catch { /* 忽略 */ }
       }
       if (fs.existsSync(item.path)) remain.push({ ...item, attempts: (item.attempts || 0) + 1 })

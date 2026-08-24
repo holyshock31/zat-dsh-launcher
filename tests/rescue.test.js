@@ -5,7 +5,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { createRescueSnapshot, rescueStatus, restoreRescueSnapshot, listBundles, diagnoseCrash, excludePlugin, recordCrash, markCrashRecovered, factoryResetProfile, FACTORY_BUNDLES } = require('../src/rescue')
+const { createRescueSnapshot, rescueStatus, restoreRescueSnapshot, listBundles, diagnoseCrash, excludePlugin, recordCrash, markCrashRecovered, migrateLegacyCredentials, factoryResetProfile, FACTORY_BUNDLES } = require('../src/rescue')
 
 function tmp(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `zat-rescue-${label}-`))
@@ -46,6 +46,49 @@ test('last crash record survives recovery marking', () => {
     assert.equal(recovered.recoveredAt, 20000)
     assert.equal(rescueStatus(dir).lastCrash.issues[0].plugin, 'bad-plugin')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('migrateLegacyCredentials 备份并把 version/refs 旧格式迁移为顶层凭据映射', () => {
+  const home = tmp('credentials-migrate')
+  const file = path.join(home, '.credentials.yaml')
+  const before = [
+    'version: 1',
+    'refs:',
+    '  DEEPSEEK_API_KEY: sk-test',
+    '  MULTILINE: |',
+    '    line-one',
+    '    line-two',
+    '',
+  ].join('\n')
+  fs.writeFileSync(file, before, { mode: 0o600 })
+  try {
+    const result = migrateLegacyCredentials(home, 12345)
+    assert.equal(result.ok, true)
+    assert.equal(result.migrated, true)
+    assert.equal(fs.readFileSync(result.backupFile, 'utf8'), before)
+    assert.equal(fs.readFileSync(file, 'utf8'), [
+      'DEEPSEEK_API_KEY: sk-test',
+      'MULTILINE: |',
+      '  line-one',
+      '  line-two',
+      '',
+    ].join('\n'))
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test('migrateLegacyCredentials 对新格式幂等，对含未知顶层字段的旧格式拒绝修改', () => {
+  const home = tmp('credentials-safe')
+  const file = path.join(home, '.credentials.yaml')
+  fs.writeFileSync(file, 'DEEPSEEK_API_KEY: sk-test\n', { mode: 0o600 })
+  try {
+    assert.deepEqual(migrateLegacyCredentials(home), { ok: true, migrated: false, reason: 'not-legacy' })
+    const unsafe = 'version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-test\nmetadata: keep-me\n'
+    fs.writeFileSync(file, unsafe, { mode: 0o600 })
+    const result = migrateLegacyCredentials(home)
+    assert.equal(result.ok, false)
+    assert.equal(fs.readFileSync(file, 'utf8'), unsafe)
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
 test('excludePlugin removes whole insert block referencing missing package (#880 pattern)', () => {
@@ -111,6 +154,15 @@ test('diagnoseCrash finds missing bundle / failed plugin / bad profile', () => {
   assert.ok(keys.includes('bad-profile:'))
   assert.equal(r.issues.find(i => i.type === 'bad-profile').fix, 'restore')
   assert.equal(r.issues.find(i => i.type === 'missing-bundle').fix, 'exclude-bundle')
+})
+
+test('diagnoseCrash 识别旧版 credentials.yaml 格式并指向安全迁移', () => {
+  const r = diagnoseCrash([
+    'credentials-local: the value for "version" in /Users/test/.dsh/.credentials.yaml must be a string',
+  ])
+  assert.equal(r.issues.length, 1)
+  assert.equal(r.issues[0].type, 'legacy-credentials')
+  assert.equal(r.issues[0].fix, 'migrate-credentials')
 })
 
 // 0.6.22 回归：npm 预构建包 rc.7 不认 --no-open 导致的启动失败，

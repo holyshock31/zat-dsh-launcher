@@ -8,6 +8,7 @@ const path = require('node:path')
 const {
   probeSource, reachableSource, downloadDshTo,
   ensurePnpm, findPnpm, pickRegistry,
+  ensureNpmCommand,
   executablePnpmOrRaw,
   GIT_MIRRORS,
   NPM_REGISTRIES,
@@ -77,12 +78,27 @@ test('ensurePnpm 缓存 exists 时直接返回（内置 pnpm 单文件）', asyn
   fs.writeFileSync(path.join(dir, 'pnpm.mjs'), '#!/usr/bin/env node\nconsole.log("fake")\n')
   const nodeExe = process.execPath
   const got = await ensurePnpm({ nodeExe, toolsDir: dir })
-  assert.equal(got, path.join(dir, 'pnpm.mjs'))
+  assert.equal(got, path.join(fs.realpathSync(dir), 'pnpm.mjs'))
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('findPnpm 返回字符串（不抛错）', () => {
   assert.equal(typeof findPnpm(), 'string')
+})
+
+test('macOS 自举 npm 生成可执行 POSIX 包装，不生成 npm.cmd', async () => {
+  const dir = tmp('zat-npm-posix')
+  const cli = path.join(dir, 'package-11.3.0', 'package', 'bin', 'npm-cli.js')
+  fs.mkdirSync(path.dirname(cli), { recursive: true })
+  fs.writeFileSync(cli, 'console.log("npm")\n', 'utf8')
+  try {
+    const command = await ensureNpmCommand({ nodeExe: process.execPath, toolsDir: dir, platform: 'darwin' })
+    assert.equal(path.basename(command), 'npm')
+    fs.accessSync(command, fs.constants.X_OK)
+    assert.equal(fs.existsSync(path.join(dir, 'npm.cmd')), false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('GIT_MIRRORS 提供多源回退，不依赖单一镜像可达', () => {

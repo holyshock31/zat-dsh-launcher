@@ -130,6 +130,7 @@ function compareVersions(a, b) {
 // 避免引擎执行 shell/curl 命令时弹出 PowerShell 窗口（用户反复反馈的弹窗问题）。
 // 引擎 lib/index.js 是编译产物，用正则精确替换 argv 构造（不匹配则不修改）。
 function patchEngineNoWindow(engineDir) {
+  if (process.platform !== 'win32') return true
   try {
     const lib = path.join(engineDir, 'lib', 'index.js')
     if (!fs.existsSync(lib)) return false
@@ -157,7 +158,7 @@ async function downloadEngineTo(targetDir, onProgress, execute = run, { force = 
   if (execute === run) {
     const gitDir = path.join(os.tmpdir(), 'zat-tools', 'git', 'cmd')
     if (fs.existsSync(gitDir)) {
-      const baseEnv = { ...process.env, PATH: `${gitDir};${process.env.PATH || ''}` }
+      const baseEnv = { ...process.env, PATH: [gitDir, process.env.PATH || ''].filter(Boolean).join(path.delimiter) }
       const wrapped = (desc, file, args, cwd, onProg, timeout) => runWithProgress(desc, file, args, cwd, onProg, timeout, baseEnv)
       wrapped.env = baseEnv
       execute = wrapped

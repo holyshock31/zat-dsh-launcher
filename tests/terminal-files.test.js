@@ -36,8 +36,9 @@ test('migrated terminal id deletes its actual managed userData terminal root', (
 })
 
 test('parent/child terminal paths block recursive file deletion', () => {
-  const parent = { id: 'p', sourceType: 'fresh-empty', dshHome: 'C:\\Users\\tester\\Desktop\\terminals', dshDir: '' }
-  const child = { id: 'c', sourceType: 'fresh-empty', dshHome: 'C:\\Users\\tester\\Desktop\\terminals\\child', dshDir: '' }
+  const parentHome = path.join(os.tmpdir(), 'zat-terminal-files-parent')
+  const parent = { id: 'p', sourceType: 'fresh-empty', dshHome: parentHome, dshDir: '' }
+  const child = { id: 'c', sourceType: 'fresh-empty', dshHome: path.join(parentHome, 'child'), dshDir: '' }
   const plan = planTerminalDeletion(parent, [child], userData)
   assert.equal(plan.blocked, true)
   assert.equal(pathsOverlap(parent.dshHome, child.dshHome), true)

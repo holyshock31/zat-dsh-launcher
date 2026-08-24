@@ -2,7 +2,7 @@
 
 **English** | [简体中文](./README.md)
 
-> A multi-terminal [DeepSeek Harness](https://github.com/deepseek-ai) desktop manager for Windows: install, run, manage, update and rescue multiple Harness instances — **each terminal is 100% independent**, zero dependencies, double-click to use.
+> A multi-terminal [DeepSeek Harness](https://github.com/deepseek-ai) desktop manager for Windows and macOS: install, run, manage, update and rescue multiple Harness instances — **each terminal is 100% independent**.
 
 Manage many Harness instances from one app: each terminal has its own port, DSH_HOME, logs, registry and session data. Deleting one terminal never affects the others; running terminals never interfere with each other.
 
@@ -11,7 +11,7 @@ Manage many Harness instances from one app: each terminal has its own port, DSH_
 ## 🌟 Highlights
 
 - **100% independent terminals**: installations use physical copies (not shared hard links) — deleting or updating one terminal never touches the others. This is a design guarantee, not a slogan.
-- **Zero-dependency, works anywhere**: node / pnpm / npm / git are all bootstrapped automatically into the user directory. No preinstalled toolchain required on any Windows machine.
+- **Automatic runtime discovery/bootstrap**: Windows and macOS discover Node even when Finder does not inherit the shell PATH. If no compatible Node exists, the launcher downloads the correct build for the host OS and CPU. Windows also bootstraps Git; macOS uses the system Git.
 - **One-click fresh install**: official prebuilt packages (npm registry first, China mirrors as automatic fallback), zero compilation, ready to run, auto-starts after install.
 - **Choose your install location**: first install prompts you to pick a folder (or create a new one); when a terminal already exists, it installs straight into the chosen directory.
 - **No black console windows**: hidden-console launch (CreateProcess-level), DSH and all its child processes never pop up console windows.
@@ -23,25 +23,30 @@ Manage many Harness instances from one app: each terminal has its own port, DSH_
 
 ## 🚀 Installation
 
-### Option 1: Portable ZIP (no install, recommended)
+### Windows release
 
 1. Download `ZAT-DSH启动器-便携版-<version>.zip` from [Releases](https://github.com/mishibeikejie/zat-dsh-launcher/releases)
 2. Extract anywhere and double-click `ZAT-DSH启动器.exe`
 3. First run: choose "一键全新安装" → pick an install location → the first Harness is downloaded and started automatically
 
-### Option 2: Installer
+Installer: download `ZAT-DSH启动器 Setup <version>.exe`, run it, then choose the install directory and shortcuts.
 
-1. Download `ZAT-DSH启动器 Setup <version>.exe`
-2. Run it; you can choose the install directory and create a desktop shortcut
+### Local macOS build
 
-### Option 3: Build from source
+The macOS artifact is currently unsigned and must be built from source on macOS. Both Apple Silicon and Intel hosts are detected, including the matching Node runtime download when needed.
 
-```powershell
+### Run or build from source
+
+```bash
 # Requires Node.js 22+ and pnpm
 pnpm install
-pnpm test          # runs the 90 unit tests
-pnpm dist          # builds the NSIS installer + win-unpacked
+pnpm test          # runs the 115 unit tests
+pnpm dev           # runs from source
+pnpm dist:mac      # macOS: DMG + ZIP (run on macOS)
+pnpm dist:win      # Windows: NSIS installer (run on Windows)
 ```
+
+`pnpm dist` passes no platform flag, so electron-builder targets the current host. Running it on a Mac therefore creates macOS artifacts.
 
 ## 🧩 Feature Overview
 
@@ -63,6 +68,7 @@ pnpm dist          # builds the NSIS installer + win-unpacked
 main.js                 Electron main process: lifecycle / IPC / install & update orchestration
 src/
   fresh-install.js      Fresh-install pipeline (official package, mirror fallback, toolchain bootstrap)
+  platform-runtime.js   Cross-platform Node/PATH/port/process management
   terminal-registry.js  Terminal registry (multi-instance merge, tombstones)
   terminal-supervisor.js Process supervision (hidden console, crash auto-restart)
   terminal-discovery.js Installed-terminal attach
@@ -74,7 +80,7 @@ src/
   toolchain-execute.js  Toolchain executor (single exit for node/pnpm/git)
 renderer/               Renderer: console / environment / rescue / wizard UI
 scripts/session-tail.cjs Session incremental reader worker (hidden console)
-tests/                  90 unit tests
+tests/                  115 unit tests
 ```
 
 ### Independence Guarantees

@@ -15,12 +15,9 @@ function normalizeDshPath(value) {
 function normalizeNpmRoot(value) {
   if (!value || typeof value !== 'string') return value
   const trimmed = String(value).replace(/[\\/]+$/, '')
-  const lower = trimmed.toLowerCase()
-  const tail = 'node_modules\\@deepseek-ai\\dsh'
-  if (lower.endsWith(tail)) {
-    return trimmed.slice(0, -tail.length).replace(/[\\/]+$/, '')
-  }
-  return trimmed
+  const tail = trimmed.match(/(?:^|[\\/])node_modules[\\/]@deepseek-ai[\\/]dsh$/i)
+  if (!tail) return trimmed
+  return trimmed.slice(0, tail.index).replace(/[\\/]+$/, '')
 }
 
 // 判断 npm 包安装模式的子类型，供调用方区分 dshHome 归属：
@@ -64,6 +61,13 @@ function extraScanRoots() {
         if (fs.existsSync(pkgDir)) roots.push(pkgDir)
       }
     } catch { /* 缓存目录不可读则跳过 */ }
+  }
+  if (process.platform !== 'win32') {
+    // POSIX 全局/用户级 npm 安装（npm prefix 常见为 ~/.local、/usr/local、Homebrew）。
+    for (const prefix of [path.join(home, '.local'), '/usr/local', '/opt/homebrew']) {
+      pushIfExists(path.join(prefix, 'lib', 'node_modules', '@deepseek-ai', 'dsh'))
+      pushIfExists(path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh'))
+    }
   }
   // 全局 npm：npm prefix 下的 node_modules/@deepseek-ai/dsh
   for (const prefix of [path.join(roaming, 'npm'), path.join(local, 'npm'), path.join(pf, 'nodejs'), path.join(pf86, 'nodejs')]) {
@@ -145,21 +149,17 @@ function inspectDshDir(value) {
   return null
 }
 
-// 解析 "{pid}|{commandLine}" 行 → { pid, commandLine }；无效返回 null
-function parseProcessEntry(line) {
-  const text = String(line || '')
-  const sep = text.indexOf('|')
-  if (sep <= 0) return null
-  const pid = Number(text.slice(0, sep))
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null
-  return { pid, commandLine: text.slice(sep + 1) }
+function execText(file, args, options, execute = execFile) {
+  return new Promise(resolve => {
+    execute(file, args, options, (error, stdout) => resolve(error ? '' : String(stdout || '')))
+  })
 }
 
-// 列出 Windows 上 node/dsh 进程：pid|命令行|cwd|监听端口（只读探测）。
+// 列出 node/dsh 进程：pid|命令行|cwd|监听端口（只读探测）。
 // cwd 通过进程 PEB 读取（Node 进程常以相对路径 apps/cli 启动，命令行里没有根目录）。
 // 监听端口用于命令行未带 --port 时确定实例实际端口。
 // C# 探测代码首次编译缓存到 %TEMP%\dsh-cwd-probe.dll，之后直接加载（编译本身 1-2 秒，加载 ~50ms）。
-function processEntries() {
+function windowsProcessEntries(execute) {
   return new Promise(resolve => {
     const csharp = [
       "'using System;using System.Runtime.InteropServices;",
@@ -190,11 +190,50 @@ function processEntries() {
       "$p=$_.ProcessId; $cwd=''; try { $cwd=[CwdProbe]::GetCwd($p) } catch {}; $ports=$portsByPid[$p];",
       "$p.ToString()+'|'+$_.CommandLine+'|'+$cwd+'|'+$ports }",
     ].join(' ')
-    execFile('powershell.exe', ['-NoProfile', '-Command', command], { windowsHide: true, timeout: 12000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+    execute('powershell.exe', ['-NoProfile', '-Command', command], { windowsHide: true, timeout: 12000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
       if (error) return resolve([])
       resolve(String(stdout || '').split(/\r?\n/).map(parseProcessEntry).filter(Boolean))
     })
   })
+}
+
+// macOS/Linux：ps 提供完整命令行，lsof 补充 cwd 与监听端口。
+// 只对命令行已命中 DSH CLI 的少量进程调用 lsof，避免全系统逐进程扫描。
+async function posixProcessEntries(execute) {
+  const ps = fs.existsSync('/bin/ps') ? '/bin/ps' : 'ps'
+  const lsof = fs.existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : 'lsof'
+  const output = await execText(ps, ['-ww', '-axo', 'pid=,command='], { timeout: 12000, maxBuffer: 8 * 1024 * 1024 }, execute)
+  const candidates = []
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/)
+    if (!match) continue
+    const commandLine = match[2]
+    const normalized = commandLine.replace(/\\/g, '/').toLowerCase()
+    const isCliEntry = /(?:^|\/)bin\.(?:js|ts)(?:\s|$)/.test(normalized)
+    if (!isCliEntry || (!normalized.includes('apps/cli/') && !normalized.includes('node_modules/@deepseek-ai/dsh/'))) continue
+    candidates.push({ pid: Number(match[1]), commandLine })
+  }
+  const results = []
+  for (const candidate of candidates) {
+    const pidText = String(candidate.pid)
+    const cwdOutput = await execText(lsof, ['-a', '-p', pidText, '-d', 'cwd', '-Fn'], { timeout: 4000, maxBuffer: 1024 * 1024 }, execute)
+    const cwd = cwdOutput.split(/\r?\n/).find(line => line.startsWith('n'))
+    const portOutput = await execText(lsof, ['-Pan', '-p', pidText, '-iTCP', '-sTCP:LISTEN', '-Fn'], { timeout: 4000, maxBuffer: 1024 * 1024 }, execute)
+    const ports = [...new Set(portOutput.split(/\r?\n/).flatMap(line => {
+      if (!line.startsWith('n')) return []
+      const match = line.match(/:(\d+)(?:\s|$)/)
+      const port = match && Number(match[1])
+      return Number.isSafeInteger(port) && port > 0 && port <= 65535 ? [port] : []
+    }))]
+    results.push({ ...candidate, cwd: cwd ? cwd.slice(1) : null, ports })
+  }
+  return results
+}
+
+function processEntries(options = {}) {
+  const platform = options.platform || process.platform
+  const execute = options.execFile || execFile
+  return platform === 'win32' ? windowsProcessEntries(execute) : posixProcessEntries(execute)
 }
 
 // 解析 "{pid}|{commandLine}|{cwd}|{ports}" 行 → { pid, commandLine, cwd, ports }；无效返回 null
@@ -229,7 +268,9 @@ const NPM_PKG_MARKER = 'node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
 const NPM_PKG_TAIL = 'node_modules\\@deepseek-ai\\dsh'
 
 function instanceFromCommandLine(commandLine, cwd) {
-  const normalized = String(commandLine || '').replace(/\//g, '\\')
+  const original = String(commandLine || '')
+  // 只统一用于查找 marker 的副本；根路径保留原始分隔符，确保随后能被宿主文件系统访问。
+  const normalized = original.replace(/\//g, '\\')
   const lower = normalized.toLowerCase()
   const srcMarker = 'apps\\cli\\'
   let index = lower.indexOf(srcMarker)
@@ -239,14 +280,14 @@ function instanceFromCommandLine(commandLine, cwd) {
     isNpm = index >= 0
   }
   if (index < 0) return null
-  let root = normalized.slice(0, index).trim().replace(/^['"]|['"]$/g, '')
+  let root = original.slice(0, index).trim().replace(/^['"]|['"]$/g, '')
   const quote = Math.max(root.lastIndexOf('"'), root.lastIndexOf("'"))
   if (quote >= 0) root = root.slice(quote + 1).trim()
   root = root.replace(/[\\/]+$/, '').trim()
   // npm 包形态：剥掉 node_modules\@deepseek-ai\dsh 尾巴，回到项目根（DSH_HOME）
   if (isNpm) root = normalizeNpmRoot(root)
   // 相对路径启动：marker 前只有 node.exe 等可执行文件 → 根目录用进程 cwd 补全
-  if (/\.(exe|cmd|bat|ps1|com)$/i.test(root)) root = ''
+  if (/\.(exe|cmd|bat|ps1|com)$/i.test(root) || /^(?:node|nodejs|dsh)$/i.test(root)) root = ''
   if (!root && cwd) root = String(cwd || '').replace(/[\\/]+$/, '')
   // cwd 也可能指向 npm 包根（旧版启动器以包根为 dshDir 启动），同样归一化到项目根
   if (isNpm && root) root = normalizeNpmRoot(root)
@@ -334,7 +375,7 @@ async function scanDshInstallations(options = {}) {
     // 用户主目录一级：任意名字的目录都可能装着 DSH（npm 包形态常见）
     if (scanDrives) for (const dir of collectLevel1Dirs(home)) common.push(dir)
     // 用户主目录再深两级（Documents/Desktop/Downloads 下常见）
-    if (scanDrives) {
+    if (scanDrives && process.platform === 'win32') {
       for (const dir of ['Documents', 'Desktop', 'Downloads', 'dev', 'Dev', 'developer', 'code', 'Code']) {
         const full = path.join(home, dir)
         if (fs.existsSync(full)) for (const d of collectDeepDirs(full, 0)) common.push(d)

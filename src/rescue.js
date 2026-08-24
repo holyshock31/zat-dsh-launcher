@@ -57,6 +57,61 @@ function markCrashRecovered(rescueDir, recoveredAt = Date.now()) {
   return record
 }
 
+// DSH credentials-local 旧格式：
+//   version: 1
+//   refs:
+//     API_KEY: value
+// 新版本要求文件本身就是「凭据引用 → 字符串」映射。仅在顶层严格只有 version/refs 时迁移；
+// 先保留 0600 备份，再原子替换，未知结构绝不自动修改。
+function migrateLegacyCredentials(dshHome, now = Date.now()) {
+  const file = path.join(String(dshHome || ''), '.credentials.yaml')
+  if (!dshHome || !fs.existsSync(file)) return { ok: true, migrated: false, reason: 'missing' }
+  let text
+  try { text = fs.readFileSync(file, 'utf8') } catch (e) { return { ok: false, migrated: false, message: `凭据文件读取失败：${e.message}` } }
+  const lines = text.split(/\r?\n/)
+  const topLevel = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line.trim() || /^\s*#/.test(line) || /^\s/.test(line)) continue
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_-]*):/)
+    topLevel.push({ index: i, key: match ? match[1] : '' })
+  }
+  const keys = topLevel.map(item => item.key)
+  if (!keys.includes('version') || !keys.includes('refs')) return { ok: true, migrated: false, reason: 'not-legacy' }
+  if (keys.some(key => key !== 'version' && key !== 'refs') || topLevel.filter(item => item.key === 'version').length !== 1 || topLevel.filter(item => item.key === 'refs').length !== 1) {
+    return { ok: false, migrated: false, message: '旧版凭据文件含未知顶层字段，已拒绝自动迁移以保护凭据' }
+  }
+  const refsIndex = topLevel.find(item => item.key === 'refs').index
+  if (!/^refs:\s*(?:\{\s*\})?\s*(?:#.*)?$/.test(lines[refsIndex])) {
+    return { ok: false, migrated: false, message: '旧版凭据 refs 不是可安全迁移的映射结构' }
+  }
+  const nested = []
+  for (let i = refsIndex + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line) { nested.push(''); continue }
+    if (line.startsWith('  ')) { nested.push(line.slice(2)); continue }
+    if (line.startsWith('\t')) { nested.push(line.slice(1)); continue }
+    if (/^\s+$/.test(line)) { nested.push(''); continue }
+    return { ok: false, migrated: false, message: '旧版凭据 refs 后存在无法确认归属的内容，已拒绝自动迁移' }
+  }
+  // refs: {} 或空 refs 对应空文档；credentials-local 将其视为空存储。
+  const next = nested.join('\n')
+  const backupFile = `${file}.legacy-${now}.bak`
+  const tempFile = `${file}.migrating-${process.pid}-${now}`
+  try {
+    fs.copyFileSync(file, backupFile, fs.constants.COPYFILE_EXCL)
+    if (process.platform !== 'win32') fs.chmodSync(backupFile, 0o600)
+    fs.writeFileSync(tempFile, next, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    if (process.platform !== 'win32') fs.chmodSync(tempFile, 0o600)
+    fs.renameSync(tempFile, file)
+    if (process.platform !== 'win32') fs.chmodSync(file, 0o600)
+    return { ok: true, migrated: true, file, backupFile }
+  } catch (e) {
+    try { fs.rmSync(tempFile, { force: true }) } catch { /* 忽略 */ }
+    return { ok: false, migrated: false, message: `旧版凭据迁移失败：${e.message}`, backupFile: fs.existsSync(backupFile) ? backupFile : '' }
+  }
+}
+
 // 查询救援点状态（是否存在、时间、文件清单、上一次崩溃记录）
 function rescueStatus(rescueDir) {
   const metaFile = path.join(rescueDir, 'snapshot.json')
@@ -114,6 +169,10 @@ function diagnoseCrash(logLines) {
   for (const raw of lines) {
     const text = String(raw || '')
     let m
+    if (/credentials-local:.*value for ["']version["'].*\.credentials\.ya?ml.*must be a string/i.test(text)) {
+      add('legacy-credentials', '', '检测到旧版 credentials.yaml（version/refs 包装格式），需要备份并迁移为顶层凭据映射', 'migrate-credentials')
+      continue
+    }
     m = text.match(/cannot resolve profile bundle ["']([^"']+)["']/i)
     if (m) { add('missing-bundle', m[1], `profile 声明了插件「${m[1]}」但未安装，导致启动失败`, 'exclude-bundle'); continue }
     m = text.match(/plugin\(s\) failed to load:\s*([^\n;]+)/i)
@@ -274,6 +333,7 @@ module.exports = {
   recordCrash,
   readCrashRecord,
   markCrashRecovered,
+  migrateLegacyCredentials,
   restoreRescueSnapshot,
   listBundles,
   diagnoseCrash,

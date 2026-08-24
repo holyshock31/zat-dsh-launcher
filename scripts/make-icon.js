@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * 生成 assets/icon.png（256×256，无第三方依赖）。
+ * 生成 assets/icon.png（512×512，无第三方依赖）。
  *
  * 用纯 Node 手写 PNG 编码器 + 4× 超采样绘制：
  *  - 浅蓝渐变圆角底（DeepSeek 品牌蓝）
@@ -18,7 +18,8 @@ const fs = require('node:fs')
 const path = require('node:path')
 const zlib = require('node:zlib')
 
-const SIZE = 256
+// electron-builder 的 macOS 图标输入最低为 512×512；窗口图标会由 Electron 自动缩放。
+const SIZE = 512
 const SS = 4
 const GRID = SIZE * SS
 
