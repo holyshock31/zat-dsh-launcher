@@ -40,7 +40,7 @@
 ```bash
 # 需要 Node.js 22+ 与 pnpm
 pnpm install
-pnpm test          # 运行 115 项单元测试
+pnpm test          # 运行 118 项单元测试
 pnpm dev           # 从源码启动
 pnpm dist:mac      # macOS：DMG + ZIP（在 Mac 上执行）
 pnpm dist:win      # Windows：NSIS 安装版（在 Windows 上执行）
@@ -80,7 +80,7 @@ src/
   toolchain-execute.js  工具链执行器（node/pnpm/git 统一出口）
 renderer/               渲染进程：控制台 / 环境 / 救援 / 向导界面
 scripts/session-tail.cjs 会话增量读取 worker（隐藏控制台）
-tests/                  115 项单元测试
+tests/                  118 项单元测试
 ```
 
 ### 终端独立性保证

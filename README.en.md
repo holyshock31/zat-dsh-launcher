@@ -40,7 +40,7 @@ The macOS artifact is currently unsigned and must be built from source on macOS.
 ```bash
 # Requires Node.js 22+ and pnpm
 pnpm install
-pnpm test          # runs the 115 unit tests
+pnpm test          # runs the 118 unit tests
 pnpm dev           # runs from source
 pnpm dist:mac      # macOS: DMG + ZIP (run on macOS)
 pnpm dist:win      # Windows: NSIS installer (run on Windows)
@@ -80,7 +80,7 @@ src/
   toolchain-execute.js  Toolchain executor (single exit for node/pnpm/git)
 renderer/               Renderer: console / environment / rescue / wizard UI
 scripts/session-tail.cjs Session incremental reader worker (hidden console)
-tests/                  115 unit tests
+tests/                  118 unit tests
 ```
 
 ### Independence Guarantees

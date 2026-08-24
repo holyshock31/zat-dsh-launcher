@@ -14,7 +14,7 @@ const { TerminalSupervisor, probePort } = require('./src/terminal-supervisor')
 const platformRuntime = require('./src/platform-runtime')
 const harnessUpdate = require('./src/harness-update')
 const { localInfo: harnessLocalInfo, checkUpdate: checkHarnessUpdate, installUpdate: installHarnessUpdate } = harnessUpdate
-const { inspectDshDir, scanDshInstallations, normalizeDshPath, normalizeNpmRoot, findRegisteredByDshDir, processEntries } = require('./src/terminal-discovery')
+const { inspectDshDir, scanDshInstallations, normalizeDshPath, normalizeNpmRoot, findRegisteredByDshDir, processEntries, findDshRootNear, findDshPackageRoots, isDshHomeDir } = require('./src/terminal-discovery')
 const freshInstall = require('./src/fresh-install')
 const engineManager = require('./src/engine-manager')
 const rescue = require('./src/rescue')
@@ -25,7 +25,7 @@ const { planTerminalDeletion } = require('./src/terminal-files')
 const toolchainExec = require('./src/toolchain-execute')
 const cliProbe = require('./src/cli-probe')
 
-const APP_VERSION = '1.2.1'
+const APP_VERSION = '1.2.2'
 
 // ---------------------------------------------------------------------------
 // 白板/交付版隔离：打包版使用按版本隔离的数据目录（%APPDATA%\ZAT-Launcher\v<版本>），
@@ -1658,8 +1658,20 @@ async function scannedReservedPorts() {
 
 async function connectDshDirectory(dshDirInput, sourceType = 'manual', options = {}) {
   // npm 包形态可能传入包根（旧版登记格式/手动选到包目录），统一归一化到项目根（DSH_HOME）
-  const dshDir = normalizeNpmRoot(String(dshDirInput || '').trim())
-  const inspected = inspectDshDir(dshDir)
+  let dshDir = normalizeNpmRoot(String(dshDirInput || '').trim())
+  let inspected = inspectDshDir(dshDir)
+  let explicitHome = ''
+  // 用户选的不一定是根目录：先在自己的子目录里找（用户愿意安哪就安哪），
+  // 再认 DSH_HOME（默认 ~/.dsh，官方 npx 方式根本没有项目根）。
+  if (!inspected) {
+    inspected = findDshRootNear(dshDir)
+    if (inspected) dshDir = inspected.dir
+  }
+  if (!inspected && isDshHomeDir(dshDir)) {
+    explicitHome = dshDir
+    inspected = findDshPackageRoots().map(r => inspectDshDir(r)).find(Boolean) || null
+    if (inspected) dshDir = inspected.dir
+  }
   if (!inspected) return { ok: false, message: '所选目录不是有效的 DeepSeek Harness 根目录' }
   if (terminalRegistry) {
     const existing = findRegisteredByDshDir(inspected.dir, terminalRegistry.list())
@@ -1669,7 +1681,7 @@ async function connectDshDirectory(dshDirInput, sourceType = 'manual', options =
   // 避免留下"fresh-empty 与已接入"两条同目录记录。
   const emptyTwin = terminalRegistry && terminalRegistry.list().find(t =>
     !t.dshDir && (t.sourceType === 'fresh-empty' || t.sourceType === 'fresh-installed-empty') &&
-    normalizeDshPath(normalizeNpmRoot(t.dshHome || '')) === normalizeDshPath(inspected.dir))
+    normalizeDshPath(normalizeNpmRoot(t.dshHome || '')) === normalizeDshPath(explicitHome || inspected.dir))
   let port = null
   let runningPid = null
   // 一次全量扫描同时完成两件事：① 判断用户选的 DSH 是否正在运行（外部启动 → 直接接管其端口）；
@@ -1711,14 +1723,16 @@ async function connectDshDirectory(dshDirInput, sourceType = 'manual', options =
   //  - 源码形态：DSH_HOME 指向其真实 home（默认 ~/.dsh）。
   // launcher 独立 home 只用于自建终端。
   const inspectedMode = inspected.mode || 'source'
-  const dshHome = inspectedMode === 'npm'
+  const dshHome = explicitHome
+    ? explicitHome
+    : inspectedMode === 'npm'
     ? inspected.dir
     : (inspectedMode === 'npx' || inspectedMode === 'npm-standalone' || sourceType === 'manual' || sourceType === 'attached' || sourceType === 'scanned' || sourceType === 'filesystem')
       ? resolveHome('')
       : path.join(app.getPath('userData'), 'terminals', id, 'dsh-home')
   fs.mkdirSync(dshHome, { recursive: true })
   // 终端名 = 文件夹名，绝不带端口后缀
-  const name = inspected.name
+  const name = explicitHome ? (path.basename(explicitHome) || 'DSH') : inspected.name
   const env = { id, name, dshHome, dshDir: inspected.dir, profileName: 'web', port, mirror: 'https://gh-proxy.com/', fallbackMirror: 'https://ghfast.top/', manual: true }
   if (emptyTwin) {
     const idx = ENVIRONMENTS.findIndex(item => item.id === id)

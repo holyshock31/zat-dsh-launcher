@@ -16,6 +16,9 @@ const {
   findRegisteredByDshDir,
   firstFreePortAvoiding,
   scanDshInstallations,
+  findDshRootNear,
+  isDshHomeDir,
+  findDshPackageRoots,
 } = require('../src/terminal-discovery')
 
 // 在临时目录构造一个"假 DSH 根"：根 package.json + apps/cli
@@ -379,4 +382,45 @@ test('instanceFromCommandLine identifies npx cache processes', () => {
     port: 3081,
     mode: 'npx',
   })
+})
+
+test('findDshRootNear finds DSH inside a user-selected parent folder', () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-dsh-near-'))
+  try {
+    const root = path.join(parent, '工具', 'deepseek-harness')
+    fs.mkdirSync(path.join(root, 'apps', 'cli'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-root', version: '0.1.1-rc.2', workspaces: ['apps/*'] }, null, 2))
+    const found = findDshRootNear(parent)
+    assert.ok(found, 'parent folder should auto-find nested DSH root')
+    assert.equal(path.resolve(found.dir).toLowerCase(), root.toLowerCase())
+  } finally { fs.rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('isDshHomeDir recognizes DSH data home (profiles + dsh.profile.bundles)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-dsh-home-'))
+  try {
+    const profile = path.join(home, 'profiles', 'web')
+    fs.mkdirSync(profile, { recursive: true })
+    fs.writeFileSync(path.join(profile, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }, null, 2))
+    assert.equal(isDshHomeDir(home), true)
+    assert.equal(isDshHomeDir(profile), false)
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test('findDshPackageRoots finds global npm package under APPDATA prefix', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-dsh-global-'))
+  const oldAppData = process.env.APPDATA
+  process.env.APPDATA = base
+  try {
+    const pkgDir = path.join(base, 'npm', 'node_modules', '@deepseek-ai', 'dsh')
+    fs.mkdirSync(path.join(pkgDir, 'lib'), { recursive: true })
+    fs.writeFileSync(path.join(pkgDir, 'lib', 'bin.js'), 'console.log("dsh")\n')
+    fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.2', bin: { dsh: 'lib/bin.js' } }, null, 2))
+    const roots = findDshPackageRoots()
+    assert.ok(Array.isArray(roots))
+    assert.ok(roots.some(r => path.resolve(r).toLowerCase() === pkgDir.toLowerCase()), `should find ${pkgDir}`)
+  } finally {
+    process.env.APPDATA = oldAppData
+    fs.rmSync(base, { recursive: true, force: true })
+  }
 })
