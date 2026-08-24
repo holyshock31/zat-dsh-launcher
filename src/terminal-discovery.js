@@ -3,7 +3,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
-const { execFile } = require('node:child_process')
+const { execFile, execFileSync } = require('node:child_process')
 
 // 大小写不敏感、去尾部反斜杠的规范路径，用于目录判重
 function normalizeDshPath(value) {
@@ -89,6 +89,91 @@ function extraScanRoots() {
     scan(base, 0)
   }
   return roots
+}
+
+// DSH 官方推荐 `npx @deepseek-ai/dsh web`，很多用户根本没有“项目根”，
+// 数据在 DSH_HOME（默认 ~/.dsh）。识别 DSH_HOME：profiles 下有带 dsh.profile.bundles 的 profile，
+// 或 profiles/node_modules 里有 @deepseek-ai/dsh-base。
+function isDshHomeDir(value) {
+  if (!value || typeof value !== 'string') return false
+  const dir = path.resolve(value)
+  const profilesDir = path.join(dir, 'profiles')
+  if (!fs.existsSync(profilesDir)) return false
+  try {
+    for (const ent of fs.readdirSync(profilesDir, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue
+      const pkgFile = path.join(profilesDir, ent.name, 'package.json')
+      if (!fs.existsSync(pkgFile)) continue
+      const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'))
+      if (pkg && pkg.dsh && pkg.dsh.profile && Array.isArray(pkg.dsh.profile.bundles)) return true
+    }
+  } catch { /* 读取失败继续 */ }
+  return fs.existsSync(path.join(profilesDir, 'node_modules', '@deepseek-ai', 'dsh-base'))
+}
+
+// 通过 dsh 命令 / 常见全局安装位置 / npm+pnpm 全局根，定位 @deepseek-ai/dsh 包根。
+// 参照 deepseek-harness-box：`Get-Command dsh` 的 shim 在 <prefix>，包在 <prefix>\node_modules\@deepseek-ai\dsh。
+function findDshPackageRoots() {
+  const roots = []
+  const push = (p) => {
+    if (!p || !fs.existsSync(p)) return
+    const normalized = path.resolve(p)
+    if (!roots.some(r => r.toLowerCase() === normalized.toLowerCase())) roots.push(normalized)
+  }
+  // 1) dsh 命令 shim：where dsh → C:\Users\x\AppData\Roaming\npm\dsh.cmd
+  try {
+    const where = String(execFileSync('where.exe', ['dsh'], { encoding: 'utf8', windowsHide: true, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }) || '')
+    for (const line of where.split(/\r?\n/)) {
+      const p = String(line || '').trim()
+      if (!p) continue
+      const prefix = p.toLowerCase().includes('node_modules\\.bin')
+        ? path.join(path.dirname(path.dirname(path.dirname(p))), 'node_modules')
+        : path.dirname(p)
+      push(path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh'))
+      push(path.join(prefix, '@deepseek-ai', 'dsh'))
+    }
+  } catch { /* 无 dsh 命令 */ }
+  // 2) npm / pnpm 全局根（cmd 包装，避免 Node 直接 exec .cmd 的 EINVAL）
+  for (const tool of ['npm', 'pnpm']) {
+    try {
+      const whereTool = String(execFileSync('where.exe', [tool], { encoding: 'utf8', windowsHide: true, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }) || '')
+      const toolPath = whereTool.split(/\r?\n/).map(s => s.trim()).find(Boolean)
+      if (!toolPath) continue
+      const rootOut = String(execFileSync('cmd.exe', ['/c', `"${toolPath}" root -g`], { encoding: 'utf8', windowsHide: true, timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] }) || '').trim()
+      if (rootOut) {
+        push(path.join(rootOut, '@deepseek-ai', 'dsh'))
+        push(path.join(rootOut, 'node_modules', '@deepseek-ai', 'dsh'))
+      }
+    } catch { /* 无该工具或执行失败 */ }
+  }
+  // 3) 常见全局目录兜底（与 extraScanRoots 同源）
+  for (const extra of extraScanRoots()) push(extra)
+  return roots
+}
+
+// 用户随便选了一个父目录：在里面递归找 DSH 根，不再要求“选的目录本身就是根”。
+function findDshRootNear(value, maxDepth = 4) {
+  if (!value || typeof value !== 'string') return null
+  const root = path.resolve(value)
+  const found = []
+  let visited = 0
+  const walk = (dir, depth) => {
+    if (depth > maxDepth || visited > 3000) return
+    visited++
+    const inspected = inspectDshDir(dir)
+    if (inspected) { found.push({ dir, inspected, depth }); return }
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue
+      if (['node_modules', '.git', '$RECYCLE.BIN', 'System Volume Information', 'Windows', 'Program Files', 'Program Files (x86)'].includes(ent.name)) continue
+      walk(path.join(dir, ent.name), depth + 1)
+      if (found.length) return
+    }
+  }
+  walk(root, 0)
+  if (found.length) return found[0].inspected
+  return null
 }
 
 // 严格校验 DSH 根目录，支持多种形态（返回 mode 供调用方区分）：
@@ -355,7 +440,11 @@ async function scanDshInstallations(options = {}) {
     }
   } catch { /* 常见位置枚举失败不阻断 */ }
   // 官方 npx/全局安装位置（不在主目录/盘符递归范围内，必须显式补扫）
-  if (scanDrives) for (const extra of extraScanRoots()) common.push(extra)
+  if (scanDrives) {
+    for (const extra of extraScanRoots()) common.push(extra)
+    // dsh 命令 / npm / pnpm 全局根：官方推荐 npx 方式，很多用户没有项目根目录
+    for (const pkgRoot of findDshPackageRoots()) common.push(pkgRoot)
+  }
   const running = []
   for (const entry of entries) {
     const parsed = instanceFromCommandLine(entry.commandLine || '', entry.cwd)
@@ -404,4 +493,7 @@ module.exports = {
   firstFreePortAvoiding,
   scanDshInstallations,
   extraScanRoots,
+  isDshHomeDir,
+  findDshPackageRoots,
+  findDshRootNear,
 }
