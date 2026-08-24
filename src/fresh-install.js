@@ -1019,6 +1019,7 @@ module.exports = {
   ensureNpmCli, installOfficialPackage, updateNpmPackage, installProfileBundles,
   ensureNodeExe, findCachedNode, patchDshSubprocessNoWindow, ensureNpmCommand, ensureUpdateToolchain,
   findSystemGit, ensureGit, executablePnpm, ensureConsoleHostDll, spawnWithHiddenConsole, normalToolsDir,
+  downloadFileNative,
   GIT_MIRRORS,
   executablePnpmOrRaw,
   resolveLatestDshVersion,

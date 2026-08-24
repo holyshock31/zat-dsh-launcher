@@ -7,9 +7,16 @@ const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
 const { updateSources } = require('./harness-update')
-const { run, runWithProgress } = require('./fresh-install')
+const { run, runWithProgress, downloadFileNative } = require('./fresh-install')
 
 const ENGINE_ORIGIN = 'https://github.com/mishibeikejie/zat-dsh-engine.git'
+const ENGINE_ZIP_SOURCES = [
+  'https://codeload.github.com/mishibeikejie/zat-dsh-engine/zip/refs/heads/main',
+  'https://codeload.github.com/mishibeikejie/zat-dsh-engine/zip/refs/heads/master',
+  'https://ghfast.top/https://codeload.github.com/mishibeikejie/zat-dsh-engine/zip/refs/heads/main',
+  'https://ghproxy.net/https://codeload.github.com/mishibeikejie/zat-dsh-engine/zip/refs/heads/main',
+  'https://gh.llkk.cc/https://codeload.github.com/mishibeikejie/zat-dsh-engine/zip/refs/heads/main',
+]
 const PATCH_ROW_ID = 'plugin-market'
 
 function profilePatchPath(profileDir) {
@@ -191,6 +198,40 @@ async function downloadEngineTo(targetDir, onProgress, execute = run, { force = 
     } catch (err) {
       lastErr = `移动目录失败：${err.message}`
       fs.rmSync(tmp, { recursive: true, force: true })
+    }
+  }
+  return { ok: false, message: lastErr || '引擎下载失败' }
+  // git 自举/克隆全部失败时的最后兜底：直接下载 GitHub 源码 zip 解压，不依赖 git。
+  // 参照同类启动器：宁可多给一种下载通道，也不能让用户卡在“找不到 git”上。
+  const zip = `${targetDir}.zip`
+  const zipTmp = `${targetDir}.zip-tmp`
+  for (let i = 0; i < ENGINE_ZIP_SOURCES.length; i++) {
+    const url = ENGINE_ZIP_SOURCES[i]
+    if (onProgress) onProgress('引擎', `下载引擎源码压缩包（${i + 1}/${ENGINE_ZIP_SOURCES.length}：${url.slice(0, 70)}…）`)
+    const dl = await downloadFileNative(url, zip, onProgress, 180000)
+    if (!dl.ok || !fs.existsSync(zip) || fs.statSync(zip).size < 1000) { fs.rmSync(zip, { force: true }); lastErr = `压缩包源 ${i + 1} 下载失败（${dl.err || '无输出'}）`; continue }
+    try {
+      fs.rmSync(zipTmp, { recursive: true, force: true })
+      fs.mkdirSync(zipTmp, { recursive: true })
+      let ex = await execute('tar.exe', ['-xf', zip, '-C', zipTmp], zipTmp, 120000)
+      if (!ex.ok) {
+        ex = await execute('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -Path '${zip}' -DestinationPath '${zipTmp}' -Force`], zipTmp, 120000)
+      }
+      const entries = fs.readdirSync(zipTmp)
+      const extracted = entries.map(n => path.join(zipTmp, n)).find(p => fs.existsSync(path.join(p, 'package.json')))
+      if (extracted && readMaybe(path.join(extracted, 'package.json')).includes('zat-dsh-engine')) {
+        fs.rmSync(targetDir, { recursive: true, force: true })
+        fs.renameSync(extracted, targetDir)
+        patchEngineNoWindow(targetDir)
+        if (onProgress) onProgress('引擎', 'zat-dsh-engine 下载完成（压缩包模式）')
+        return { ok: true, dir: targetDir, via: 'zip' }
+      }
+      lastErr = '压缩包解压后未找到 zat-dsh-engine 包'
+    } catch (err) {
+      lastErr = `压缩包解压失败：${err && err.message || err}`
+    } finally {
+      fs.rmSync(zip, { force: true })
+      fs.rmSync(zipTmp, { recursive: true, force: true })
     }
   }
   return { ok: false, message: lastErr || '引擎下载失败' }
