@@ -7,8 +7,10 @@ const os = require('node:os')
 const path = require('node:path')
 const {
   normalizeDshPath,
+  normalizeNpmRoot,
   inspectDshDir,
   parseProcessEntry,
+  processEntries,
   instanceFromCommandLine,
   rootsFromCommandLine,
   findRegisteredByDshDir,
@@ -52,6 +54,11 @@ test('normalizeDshPath 大小写不敏感且去除尾部反斜杠', () => {
   const p = path.join('C:', 'Some', 'Dir')
   assert.equal(normalizeDshPath(`${p}\\`), normalizeDshPath(`${p.toLowerCase()}`))
   assert.equal(normalizeDshPath(path.join('C:', 'a', 'b')), normalizeDshPath(path.join('c:', 'A', 'B')))
+})
+
+test('normalizeNpmRoot 同时识别 Windows 与 POSIX 包根', () => {
+  assert.equal(normalizeNpmRoot('D:\\2\\node_modules\\@deepseek-ai\\dsh'), 'D:\\2')
+  assert.equal(normalizeNpmRoot('/opt/dsh/node_modules/@deepseek-ai/dsh'), '/opt/dsh')
 })
 
 test('inspectDshDir 拒绝非 DSH 目录', () => {
@@ -125,6 +132,53 @@ test('parseProcessEntry 解析 PID|命令行|cwd|端口', () => {
   assert.equal(parseProcessEntry('-5|x'), null)
 })
 
+test('processEntries 在 macOS 使用 ps/lsof 枚举 DSH 命令、cwd 与监听端口', async () => {
+  const calls = []
+  const fakeExecFile = (file, args, options, callback) => {
+    calls.push({ file, args })
+    if (file.endsWith('/ps') || file === 'ps') {
+      callback(null, ' 4321 /opt/node /Users/test/dsh/apps/cli/lib/bin.js web --port 3088\n')
+      return
+    }
+    if ((file.endsWith('/lsof') || file === 'lsof') && args.includes('-d')) {
+      callback(null, 'p4321\nfcwd\nn/Users/test/dsh\n')
+      return
+    }
+    if (file.endsWith('/lsof') || file === 'lsof') {
+      callback(null, 'p4321\nn127.0.0.1:3088\n')
+      return
+    }
+    callback(new Error(`unexpected ${file}`), '')
+  }
+  const entries = await processEntries({ platform: 'darwin', execFile: fakeExecFile })
+  assert.deepEqual(entries, [{
+    pid: 4321,
+    commandLine: '/opt/node /Users/test/dsh/apps/cli/lib/bin.js web --port 3088',
+    cwd: '/Users/test/dsh',
+    ports: [3088],
+  }])
+  assert.ok(calls.some(call => call.file.endsWith('/ps') || call.file === 'ps'))
+  assert.ok(calls.some(call => call.file.endsWith('/lsof') || call.file === 'lsof'))
+})
+
+test('processEntries 在 macOS 同时识别源码形态的 bin.ts 入口', async () => {
+  const fakeExec = (file, args, _options, callback) => {
+    if (String(file).endsWith('/ps')) {
+      callback(null, '321 node apps/cli/src/bin.ts --port 3082\n')
+      return
+    }
+    if (args.includes('cwd')) callback(null, 'p321\nn/Users/ww/deepseek-harness\n')
+    else callback(null, 'p321\nn127.0.0.1:3082\n')
+  }
+  const rows = await processEntries({ platform: 'darwin', execFile: fakeExec })
+  assert.deepEqual(rows, [{
+    pid: 321,
+    commandLine: 'node apps/cli/src/bin.ts --port 3082',
+    cwd: '/Users/ww/deepseek-harness',
+    ports: [3082],
+  }])
+})
+
 test('instanceFromCommandLine 从运行中的 DSH CLI 提取根目录与端口', () => {
   const cli = `"C:\\node\\node.exe" "D:\\deepseek-harness\\apps\\cli\\lib\\bin.js" web --port 3081`
   const parsed = instanceFromCommandLine(cli)
@@ -140,6 +194,12 @@ test('instanceFromCommandLine 从运行中的 DSH CLI 提取根目录与端口',
   assert.equal(instanceFromCommandLine('"C:\\node\\node.exe" apps\\cli\\lib\\bin.js web'), null)
   // 非 DSH 命令行
   assert.equal(instanceFromCommandLine('C:\\Windows\\System32\\cmd.exe /c dir'), null)
+})
+
+test('instanceFromCommandLine 保留宿主平台可访问的路径格式', () => {
+  const root = path.join(os.tmpdir(), 'dsh-parser-root')
+  const cli = `"${process.execPath}" "${path.join(root, 'apps', 'cli', 'lib', 'bin.js')}" web --port 3081`
+  assert.deepEqual(instanceFromCommandLine(cli), { root, port: 3081, mode: 'source' })
 })
 
 test('instanceFromCommandLine 识别 npm 包形态运行实例并归一化到项目根', () => {

@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | **简体中文**
 
-> 多终端 [DeepSeek Harness](https://github.com/deepseek-ai) 桌面管理器：安装、启动、管理、更新、救援一条龙，**每个终端 100% 独立**，任何机器双击即用。
+> 面向 Windows 与 macOS 的多终端 [DeepSeek Harness](https://github.com/deepseek-ai) 桌面管理器：安装、启动、管理、更新、救援一条龙，**每个终端 100% 独立**。
 
 一个应用管理多个 Harness：每个终端独立端口、独立 DSH_HOME、独立日志、独立会话数据。删除一个终端不影响其他终端，运行中的终端互不干扰。
 
@@ -11,7 +11,7 @@
 ## 🌟 为什么选它
 
 - **终端 100% 独立**：安装采用独立拷贝（非共享硬链接），删除/更新一个终端绝不影响其他终端——这是设计底线，不是口号
-- **零依赖白板运行**：node / pnpm / npm / git 全部自动自举到用户目录，任何 Windows 机器双击即用，不需要预装任何东西
+- **运行时自动发现/自举**：Windows 与 macOS 均可自动发现 Node（包括 Finder 不继承 shell PATH 的情况）；缺少合格 Node 时会按当前系统与 CPU 下载正确发行版。Windows 同时自举 Git，macOS 使用系统 Git
 - **一键全新安装**：官方预构建包（npm registry 官方优先、国内镜像自动回退），零编译即装即跑，装完自动启动
 - **安装位置自选**：首次安装先选文件夹（可新建），已有终端时直接装入已选目录
 - **不弹黑窗**：隐藏控制台启动（CreateProcess 级），DSH 及其所有子进程都不弹黑色窗口
@@ -23,25 +23,30 @@
 
 ## 🚀 安装方式
 
-### 方式一：解压版（便携，免安装，推荐）
+### Windows 发布版
 
 1. 前往 [Releases](https://github.com/mishibeikejie/zat-dsh-launcher/releases) 下载 `ZAT-DSH启动器-便携版-<版本>.zip`
 2. 解压到任意目录，双击 `ZAT-DSH启动器.exe`
 3. 首次使用：选择「一键全新安装」→ 选择安装位置 → 自动下载并启动第一个 Harness
 
-### 方式二：安装版
+安装版：下载 `ZAT-DSH启动器 Setup <版本>.exe`，运行后可选择安装目录并创建快捷方式。
 
-1. 下载 `ZAT-DSH启动器 Setup <版本>.exe`
-2. 运行安装，可选择安装目录、创建桌面快捷方式
+### macOS 本地构建版
 
-### 方式三：从源码构建
+当前 macOS 产物未签名，需在 macOS 机器上从源码构建。启动器会识别 Apple Silicon 与 Intel 架构，并在需要时下载对应 Node 运行时。
 
-```powershell
+### 从源码运行或构建
+
+```bash
 # 需要 Node.js 22+ 与 pnpm
 pnpm install
-pnpm test          # 运行 90 项单元测试
-pnpm dist          # 打包（NSIS 安装版 + win-unpacked）
+pnpm test          # 运行 118 项单元测试
+pnpm dev           # 从源码启动
+pnpm dist:mac      # macOS：DMG + ZIP（在 Mac 上执行）
+pnpm dist:win      # Windows：NSIS 安装版（在 Windows 上执行）
 ```
+
+`pnpm dist` 没有指定平台参数，electron-builder 会默认构建当前宿主平台；因此在 Mac 上执行时会生成 macOS 产物。
 
 ## 🧩 核心功能
 
@@ -63,6 +68,7 @@ pnpm dist          # 打包（NSIS 安装版 + win-unpacked）
 main.js                 Electron 主进程：终端生命周期 / IPC / 安装与更新编排
 src/
   fresh-install.js      一键安装管道（官方包下载、镜像回退、工具链自举）
+  platform-runtime.js   跨平台 Node / PATH / 端口与进程管理
   terminal-registry.js  终端注册表（多实例合并、tombstone）
   terminal-supervisor.js 进程守护（隐藏控制台、崩溃自动重启）
   terminal-discovery.js 已安装终端接入
@@ -74,7 +80,7 @@ src/
   toolchain-execute.js  工具链执行器（node/pnpm/git 统一出口）
 renderer/               渲染进程：控制台 / 环境 / 救援 / 向导界面
 scripts/session-tail.cjs 会话增量读取 worker（隐藏控制台）
-tests/                  90 项单元测试
+tests/                  118 项单元测试
 ```
 
 ### 终端独立性保证

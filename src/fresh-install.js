@@ -11,6 +11,7 @@ const { execFile, spawn } = require('node:child_process')
 const { EventEmitter } = require('node:events')
 const { updateSources } = require('./harness-update')
 const { wrapJsFile } = require('./toolchain-execute')
+const platformRuntime = require('./platform-runtime')
 
 const DSH_ORIGIN = 'https://github.com/deepseek-ai/deepseek-harness.git'
 const DSH_NPM_PACKAGE = '@deepseek-ai/dsh'
@@ -136,14 +137,14 @@ async function downloadDshTo(targetDir, onProgress, execute = runWithProgress, p
 }
 
 // 定位已有 pnpm；工具目录已自举则优先复用（缓存），否则找系统 pnpm；都没有时从 npm 镜像自举
-async function ensurePnpm({ nodeExe, toolsDir, onProgress, execute = run }) {
+async function ensurePnpm({ nodeExe, toolsDir, onProgress, execute = run, platform = process.platform }) {
   // ★ 目录归一化（1.0.12）：无论调用方传什么（可能是 8.3 短路径），统一 realpath 长路径，
   //   否则 node ESM 对短路径解析失败（ERR_MODULE_NOT_FOUND，用户朋友机器实测）。
   const rawDir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
-  const dir = (() => { try { fs.mkdirSync(rawDir, { recursive: true }); return fs.realpathSync(rawDir) } catch { return normalToolsDir() + '\\zat-tools' } })()
+  const dir = (() => { try { fs.mkdirSync(rawDir, { recursive: true }); return fs.realpathSync(rawDir) } catch { return path.join(normalToolsDir(), 'zat-tools') } })()
   const cached = path.join(dir, 'pnpm.mjs')
   if (fs.existsSync(cached)) return cached
-  const existing = findPnpm()
+  const existing = findPnpm({ platform })
   if (existing) return existing
   // 内置 pnpm（assets/pnpm.cjs = 官方 dist/pnpm.mjs 单文件）：直接复制，零下载零安装。
   // asarUnpack 后 Electron 会把 asar 路径透明映射到 resources/app.asar.unpacked 物理文件，
@@ -153,7 +154,8 @@ async function ensurePnpm({ nodeExe, toolsDir, onProgress, execute = run }) {
   return cached
 }
 
-function findPnpm() {
+function findPnpm(options = {}) {
+  const platform = options.platform || process.platform
   // 只认 .cjs / .mjs / .exe：Node 24 的 execFile/spawn 对 .cmd 在无 shell 下直接 EINVAL，
   // 且 zat-tools 里的 pnpm.cmd 包装可能引用已消失的 node/pnpm.cjs（残留垃圾）。
   // .cjs/.mjs 由 executablePnpm 用 node 直接执行；.exe 系统 pnpm 优先（本机 11.22.0）。
@@ -169,6 +171,9 @@ function findPnpm() {
     path.join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
     path.join(os.homedir(), 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
   ]
+  if (platform !== 'win32') {
+    candidates.push(platformRuntime.findSystemExecutable('pnpm', { platform }))
+  }
   // 常见开发工具自带的 pnpm（runtime 缓存，与 findNodeExe 同一套递归探测，不硬编码个人路径）
   const findUnderCache = (dir, depth) => {
     if (depth > 5) return null
@@ -242,7 +247,8 @@ async function downloadCliTgz(url, dir, version, onProgress) {
     const extractDir = path.join(dir, `package-${version}`)
     fs.rmSync(extractDir, { recursive: true, force: true })
     fs.mkdirSync(extractDir, { recursive: true })
-    const tar = await run('tar.exe', ['-xzf', tgz, '-C', extractDir], dir, 120000)
+    const tarCommand = process.platform === 'win32' ? 'tar.exe' : (fs.existsSync('/usr/bin/tar') ? '/usr/bin/tar' : 'tar')
+    const tar = await run(tarCommand, ['-xzf', tgz, '-C', extractDir], dir, 120000)
     if (!tar.ok) { fs.rmSync(extractDir, { recursive: true, force: true }); return '' }
     const binDir = path.join(extractDir, 'package', 'bin')
     const entry = fs.existsSync(path.join(binDir, 'pnpm.cjs'))
@@ -270,7 +276,7 @@ async function installDependencies(dshDir, pnpmCjs, nodeExe, onProgress, execute
   // 会调用裸 `node`，若机器上 node 不在 PATH 则安装失败。任何环境都必须可装。
   const nodeBinDir = nodeExe && nodeExe !== 'pnpm' ? path.dirname(nodeExe) : ''
   const envForPnpm = nodeBinDir
-    ? { ...process.env, PATH: `${nodeBinDir};${process.env.PATH || ''}` }
+    ? { ...process.env, PATH: platformRuntime.mergePath([nodeBinDir], process.env.PATH || '') }
     : undefined
   const runPnpm = (description, args, timeout) => {
     const cmd = pnpmCjs === 'pnpm'
@@ -336,28 +342,32 @@ async function ensureNpmCli({ nodeExe, toolsDir, onProgress, execute = runWithPr
   throw new Error('无法自举 npm CLI（registry 均不可用）')
 }
 
-// 确保 toolsDir 里有可执行的 npm.cmd（DSH build 脚本直接调 `npm run ...`）。
-// 本机往往没有全局 npm，这里用自举的 npm-cli.js 生成一个 npm.cmd 包装（幂等）。
-// 返回 npm.cmd 路径；失败返回 ''（调用方决定是否降级）。
-async function ensureNpmCommand({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
+// 确保 toolsDir 里有可执行的 npm 命令。Windows 生成 npm.cmd；POSIX 生成可执行 shell 包装。
+async function ensureNpmCommand({ nodeExe, toolsDir, onProgress, execute = runWithProgress, platform = process.platform }) {
   try {
     const dir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
-    const npmCmd = path.join(dir, 'npm.cmd')
-    if (fs.existsSync(npmCmd)) return npmCmd
+    const npmCommand = path.join(dir, platform === 'win32' ? 'npm.cmd' : 'npm')
+    if (fs.existsSync(npmCommand)) return npmCommand
     const cli = await ensureNpmCli({ nodeExe, toolsDir: dir, onProgress, execute })
     if (!cli || !fs.existsSync(cli)) return ''
     const nodePath = String(nodeExe || 'node').replace(/"/g, '')
     const cliPath = String(cli).replace(/"/g, '')
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(npmCmd, `@echo off\r\n"${nodePath}" "${cliPath}" %*\r\n`, 'utf8')
-    return npmCmd
+    if (platform === 'win32') {
+      fs.writeFileSync(npmCommand, `@echo off\r\n"${nodePath}" "${cliPath}" %*\r\n`, 'utf8')
+    } else {
+      const quote = value => `'${String(value).replace(/'/g, `'"'"'`)}'`
+      fs.writeFileSync(npmCommand, `#!/bin/sh\nexec ${quote(nodePath)} ${quote(cliPath)} "$@"\n`, 'utf8')
+      fs.chmodSync(npmCommand, 0o755)
+    }
+    return npmCommand
   } catch { return '' }
 }
 
 // 更新/构建工具链自举（白板原则：任何机器双击即用，不依赖预装 Node/npm/pnpm/git）。
 // 返回 { pnpmExe, env }：pnpmExe 可直接执行；env.PATH 已注入 node、pnpm、npm、git 所在目录，
 // 保证 DSH build 脚本里的 `node`/`pnpm`/`npm` 命令和更新/插件安装的 `git` 命令都能找到。
-async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
+async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = runWithProgress, platform = process.platform, arch = process.arch }) {
   // ★ 目录归一化（1.0.12）：toolsDir 可能是 8.3 短路径，realpath 展开成长路径
   //   （ESM 对短路径解析模块失败，用户朋友机器实测 ERR_MODULE_NOT_FOUND）。
   let dir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
@@ -365,10 +375,10 @@ async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = 
   try { dir = fs.realpathSync(dir) } catch { /* 保持原样 */ }
   const extraDirs = []
   // 1) node：传入或用自举缓存
-  let node = String(nodeExe || findCachedNode(dir) || '').trim()
+  let node = String(nodeExe || findCachedNode(dir, platform) || '').trim()
   if (!node) {
     try {
-      const info = await ensureNodeExe({ nodeExe: '', toolsDir: dir, onProgress, execute })
+      const info = await ensureNodeExe({ nodeExe: '', toolsDir: dir, onProgress, execute, platform, arch })
       if (info.ok) node = String(info.nodeExe || '')
     } catch { node = '' }
   }
@@ -376,18 +386,20 @@ async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = 
   const nodePath = node || 'node'
   // 2) npm.cmd（DSH build 脚本直接调 npm）——必须排在 node 目录之前，
   //    否则命中 node 发行版自带的旧 npm（10.x arborist 崩溃）。zat-tools 里的 npm.cmd 是 11.3.0。
-  const npmCmd = await ensureNpmCommand({ nodeExe: nodePath, toolsDir: dir, onProgress, execute })
+  const siblingNpm = platform === 'win32' || nodePath === 'node' ? '' : path.join(path.dirname(nodePath), 'npm')
+  const systemNpm = platform === 'win32' ? '' : (fs.existsSync(siblingNpm) ? siblingNpm : platformRuntime.findSystemExecutable('npm', { platform }))
+  const npmCmd = systemNpm || await ensureNpmCommand({ nodeExe: nodePath, toolsDir: dir, onProgress, execute, platform })
   const npmFirstDirs = []
   if (npmCmd) npmFirstDirs.push(dir)
   // 3) pnpm：系统 pnpm 优先，否则自举 cjs。绝不生成 .cmd 包装（Node 24 execFile(.cmd) EINVAL），
   //    .cjs 由 executablePnpm 用 node 执行；env.PATH 加 node/pnpm 目录供 DSH build 的 pnpm 命令解析。
   let pnpmExe = ''
-  try { pnpmExe = findPnpm() } catch { pnpmExe = '' }
+  try { pnpmExe = findPnpm({ platform }) } catch { pnpmExe = '' }
   if (!pnpmExe || !fs.existsSync(pnpmExe)) {
-    try { pnpmExe = await ensurePnpm({ nodeExe: nodePath, toolsDir: dir, onProgress, execute }) } catch { pnpmExe = '' }
+    try { pnpmExe = await ensurePnpm({ nodeExe: nodePath, toolsDir: dir, onProgress, execute, platform }) } catch { pnpmExe = '' }
   }
   if (pnpmExe) {
-    if (/\.exe$/i.test(pnpmExe)) {
+    if (/\.exe$/i.test(pnpmExe) || (platform !== 'win32' && !/\.[cm]?js$/i.test(pnpmExe))) {
       extraDirs.push(path.dirname(pnpmExe))
     } else if (/\.cjs$/i.test(pnpmExe)) {
       // node 目录已在 extraDirs（上面 node 分支）；cjs 所在目录一并加入，便于 pnpm 相关工具解析
@@ -395,10 +407,10 @@ async function ensureUpdateToolchain({ nodeExe, toolsDir, onProgress, execute = 
     }
   }
   // 4) git：系统 git 优先，没有则自举 PortableGit 到 zat-tools\git（官方 GitHub → ghfast/gh-proxy 镜像）
-  const gitExe = await ensureGit({ toolsDir: dir, onProgress, execute })
+  const gitExe = await ensureGit({ toolsDir: dir, onProgress, execute, platform })
   if (gitExe) extraDirs.push(path.dirname(gitExe))
   // npm 目录必须排最前（覆盖 node 发行版自带的旧 npm）；其后 node/pnpm/git/系统 PATH
-  const env = { ...process.env, PATH: [...npmFirstDirs, ...extraDirs, process.env.PATH || ''].filter(Boolean).join(';') }
+  const env = { ...process.env, PATH: platformRuntime.mergePath([...npmFirstDirs, ...extraDirs], process.env.PATH || '', platform === 'win32' ? ';' : ':') }
   return { pnpmExe: pnpmExe || '', nodeExe: nodePath, env }
 }
 
@@ -413,7 +425,9 @@ const GIT_MIRRORS = [
   'https://ghproxy.com/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/PortableGit-2.47.1-64-bit.7z.exe',
 ]
 
-function findSystemGit() {
+function findSystemGit(options = {}) {
+  const platform = options.platform || process.platform
+  if (platform !== 'win32') return platformRuntime.findSystemExecutable('git', { platform })
   const candidates = []
   try {
     const which = require('node:child_process').execFileSync('where.exe', ['git'], { stdio: 'pipe', encoding: 'utf8', windowsHide: true })
@@ -432,14 +446,19 @@ function findSystemGit() {
 }
 
 // 自举 PortableGit：下载 .7z.exe 自解压包并静默解压（-y -gm2 -o"<dir>"），然后清理自解压壳。
-async function ensureGit({ toolsDir, onProgress, execute = run }) {
+async function ensureGit({ toolsDir, onProgress, execute = run, platform = process.platform }) {
   try {
     const dir = toolsDir || path.join(normalToolsDir(), 'zat-tools')
     const gitDir = path.join(dir, 'git')
     const gitExe = path.join(gitDir, 'cmd', 'git.exe')
     if (fs.existsSync(gitExe)) return gitExe
-    const system = findSystemGit()
+    const system = findSystemGit({ platform })
     if (system) return system
+    // PortableGit 是 Windows 专用。macOS 使用系统/Xcode/Homebrew Git；找不到时由调用方明确报错。
+    if (platform !== 'win32') {
+      if (onProgress) onProgress('git', '未找到系统 Git；请先安装 Xcode Command Line Tools 或 Homebrew Git')
+      return ''
+    }
     fs.mkdirSync(dir, { recursive: true })
     let lastErr = ''
     for (let i = 0; i < GIT_MIRRORS.length; i++) {
@@ -463,81 +482,79 @@ async function ensureGit({ toolsDir, onProgress, execute = run }) {
   } catch { return '' }
 }
 
-// 确保有可用的 Node.js：给定探测结果为空时，自动下载 Windows 便携版（官方 → 国内镜像，多版本回退）。
+// 确保有可用的 Node.js：给定探测结果为空时，按宿主平台下载便携版（官方 → 国内镜像，多版本回退）。
 // 解决普遍性问题：普通用户机器可能没有 Node，DSH 启动/安装必须能自动获取运行时。
 // 返回 { ok, nodeExe, downloaded }；失败返回 { ok:false, message }。
-function findCachedNode(toolsDir) {
+function findCachedNode(toolsDir, platform = process.platform) {
   try {
     if (!fs.existsSync(toolsDir)) return ''
+    const direct = path.join(toolsDir, platform === 'win32' ? 'node.exe' : 'node')
+    if (fs.existsSync(direct)) return direct
     for (const ent of fs.readdirSync(toolsDir, { withFileTypes: true })) {
       if (!ent.isDirectory()) continue
-      const exe = path.join(toolsDir, ent.name, 'node.exe')
+      const exe = path.join(toolsDir, ent.name, platform === 'win32' ? 'node.exe' : path.join('bin', 'node'))
       if (fs.existsSync(exe)) return exe
     }
   } catch { /* 目录不可读 */ }
   return ''
 }
-async function ensureNodeExe({ nodeExe, toolsDir, onProgress, execute = runWithProgress }) {
+
+function syncSharedNode(nodeExe, platform = process.platform) {
+  try {
+    const sharedDir = path.join(normalToolsDir(), 'zat-tools')
+    fs.mkdirSync(sharedDir, { recursive: true })
+    const sharedNode = path.join(sharedDir, platform === 'win32' ? 'node.exe' : 'node')
+    if (fs.existsSync(sharedNode)) return sharedNode
+    let src = nodeExe
+    if (nodeExe === 'node') {
+      try { src = require('node:child_process').execFileSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' }).trim() } catch { src = '' }
+    }
+    if (!src || !fs.existsSync(src)) return ''
+    if (platform !== 'win32') {
+      try { fs.symlinkSync(src, sharedNode); return sharedNode } catch { /* 回退硬链接/复制 */ }
+    }
+    try { fs.linkSync(src, sharedNode) } catch { fs.copyFileSync(src, sharedNode) }
+    if (platform !== 'win32') fs.chmodSync(sharedNode, 0o755)
+    return sharedNode
+  } catch { return '' }
+}
+
+async function ensureNodeExe({ nodeExe, toolsDir, onProgress, execute = runWithProgress, platform = process.platform, arch = process.arch }) {
   if (nodeExe) {
-    // 无论 node 来源（PATH/系统/缓存），都确保共享副本存在（%TEMP%\zat-tools\node.exe），
-    // 插件市场按 0.6.4 约定探测该位置，任何电脑上都要对得上。
-    try {
-      const sharedDir = path.join(normalToolsDir(), 'zat-tools')
-      fs.mkdirSync(sharedDir, { recursive: true })
-      const sharedNode = path.join(sharedDir, 'node.exe')
-      if (!fs.existsSync(sharedNode)) {
-        let src = nodeExe
-        if (nodeExe === 'node') {
-          try { src = require('node:child_process').execFileSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' }).trim() } catch { src = '' }
-        }
-        if (src && fs.existsSync(src)) {
-          try { fs.linkSync(src, sharedNode) } catch { fs.copyFileSync(src, sharedNode) }
-        }
-      }
-    } catch { /* 共享目录失败不影响主路径 */ }
+    syncSharedNode(nodeExe, platform)
     return { ok: true, nodeExe }
   }
   fs.mkdirSync(toolsDir, { recursive: true })
-  const cached = findCachedNode(toolsDir)
+  const cached = findCachedNode(toolsDir, platform)
   if (cached) {
-    // 缓存命中也要同步共享副本（%TEMP%\zat-tools\node.exe）——系统清理 TEMP 后市场探测位会缺失
-    try {
-      const sharedDir = path.join(normalToolsDir(), 'zat-tools')
-      fs.mkdirSync(sharedDir, { recursive: true })
-      const sharedNode = path.join(sharedDir, 'node.exe')
-      if (!fs.existsSync(sharedNode)) {
-        try { fs.linkSync(cached, sharedNode) } catch { fs.copyFileSync(cached, sharedNode) }
-      }
-    } catch { /* 共享目录失败不影响主路径 */ }
+    syncSharedNode(cached, platform)
     return { ok: true, nodeExe: cached, downloaded: false }
   }
   const versions = ['v22.19.0', 'v24.4.0', 'v22.20.0'] // 全部满足 DSH engines: ^22.19.0 || >=24.0.0
   const bases = ['https://nodejs.org/dist', 'https://npmmirror.com/mirrors/node', 'https://mirrors.huaweicloud.com/nodejs', 'https://mirrors.aliyun.com/nodejs-release']
+  const supported = platformRuntime.nodeDistributionSpec(versions[0], platform, arch)
+  if (!supported) return { ok: false, message: `当前平台 ${platform}/${arch} 暂不支持自动安装 Node.js` }
   let lastErr = ''
   for (const version of versions) {
     for (const base of bases) {
-      const folder = `node-${version}-win-x64`
-      const url = `${base}/${version}/${folder}.zip`
-      const zip = path.join(toolsDir, `${folder}.zip`)
+      const spec = platformRuntime.nodeDistributionSpec(version, platform, arch)
+      const url = `${base}/${version}/${spec.archiveName}`
+      const archive = path.join(toolsDir, spec.archiveName)
       if (onProgress) onProgress('Node', `下载 Node.js ${version}（${base.includes('npmmirror') ? '国内镜像' : '官方源'}）…`)
-      const dl = await downloadFileNative(url, zip, onProgress, 90000)
+      const dl = await downloadFileNative(url, archive, onProgress, 90000)
       if (!dl.ok) { lastErr = String(dl.err || '下载失败'); continue }
-      const r = await execute('Node', 'powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -Path '${zip}' -DestinationPath '${toolsDir}' -Force`], toolsDir, onProgress, 120000)
-      try { fs.rmSync(zip, { force: true }) } catch { /* 忽略 */ }
-      const exe = path.join(toolsDir, folder, 'node.exe')
+      const extraction = platform === 'win32'
+        ? ['powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -Path '${archive}' -DestinationPath '${toolsDir}' -Force`]]
+        : [fs.existsSync('/usr/bin/tar') ? '/usr/bin/tar' : 'tar', ['-xzf', archive, '-C', toolsDir]]
+      const r = await execute('Node', extraction[0], extraction[1], toolsDir, onProgress, 120000)
+      try { fs.rmSync(archive, { force: true }) } catch { /* 忽略 */ }
+      if (!r.ok) { lastErr = String(r.err || '解压失败'); continue }
+      const exe = path.join(toolsDir, spec.folder, spec.nodeRelativePath)
       if (fs.existsSync(exe)) {
+        if (platform !== 'win32') { try { fs.chmodSync(exe, 0o755) } catch { /* 压缩包通常已保留权限 */ } }
         const ver = await execute('Node', exe, ['-v'], toolsDir, onProgress, 10000)
         if (ver.ok) {
-          // 与插件市场共享：把 node.exe 同步到 %TEMP%\zat-tools（市场探测位），双方不重复下载。
-          // 硬链接优先（同盘省空间），失败退复制；已存在则跳过。
-          try {
-            const sharedDir = path.join(normalToolsDir(), 'zat-tools')
-            fs.mkdirSync(sharedDir, { recursive: true })
-            const sharedNode = path.join(sharedDir, 'node.exe')
-            if (!fs.existsSync(sharedNode)) {
-              try { fs.linkSync(exe, sharedNode) } catch { fs.copyFileSync(exe, sharedNode) }
-            }
-          } catch { /* 共享目录失败不影响主路径 */ }
+          syncSharedNode(exe, platform)
           return { ok: true, nodeExe: exe, downloaded: true }
         }
         lastErr = 'Node 校验失败'
@@ -568,6 +585,9 @@ function executablePnpm(pnpmExe, nodeExe) {
       if (m && fs.existsSync(m[1])) return { file: String(nodeExe || 'node'), args: [m[1]] }
     } catch { /* 解析失败返回 null */ }
     return null
+  }
+  if (process.platform !== 'win32' && fs.existsSync(p)) {
+    try { fs.accessSync(p, fs.constants.X_OK); return { file: p, args: [] } } catch { /* 不可执行 */ }
   }
   return fs.existsSync(p) ? { file: p, args: [] } : null
 }
@@ -621,6 +641,7 @@ const CONSOLE_HOST_CSHARP = [
 // 确保隐藏控制台启动器 DLL 已编译（缓存到 %TEMP%\zat-tools\dsh-console-host.dll）。
 // 缓存带源码哈希校验：C# 代码更新后自动重新编译，避免旧 DLL 不匹配导致静默退回普通 spawn。
 async function ensureConsoleHostDll(execute = run) {
+  if (process.platform !== 'win32') return ''
   const dll = CONSOLE_HOST_DLL()
   const csFile = path.join(path.dirname(dll), 'dsh-console-host.cs')
   try {
@@ -651,6 +672,10 @@ async function ensureConsoleHostDll(execute = run) {
  */
 async function spawnWithHiddenConsole(program, args, options = {}) {
   const { cwd, env, stdio = ['ignore', 'pipe', 'pipe'], detached = true } = options
+  if (process.platform !== 'win32') {
+    const child = spawn(program, args, { cwd, env, stdio, detached, shell: false })
+    return { ok: true, hiddenConsole: false, child, pid: child.pid }
+  }
   const dll = await ensureConsoleHostDll()
   if (dll) {
     try {
@@ -765,7 +790,7 @@ async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress
   const registry = await pickRegistry(nodeExe)
   // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
   const toolchainEnv = execute && execute.env || null
-  const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
+  const envForCli = toolchainEnv || { ...process.env, PATH: platformRuntime.mergePath([path.dirname(nodeExe)], process.env.PATH || '') }
   // bundle 版本必须与 DSH 匹配：registry 上 @latest 指向旧版 0.0.1-rc.1，@next 才是当前 rc（与 @deepseek-ai/dsh 同版本线）。
   // 但 pnpm 的 @next 标签在"已装过"目录解析不可靠（实测 add @next 仍装出旧 rc.7），
   // 必须用 dist-tags 动态解析出的具体版本号（rc.7→rc.8 更新实测 3.9s 成功）；
@@ -804,6 +829,7 @@ async function installProfileBundles({ nodeExe, profileDir, toolsDir, onProgress
 //  - workspace 布局（官方新版源码树）：packages/*/*/subprocess-local/lib/index.js 等
 //  - 任意深度的 subprocess-local/lib/index.js（递归，覆盖未来布局变化）
 function patchDshSubprocessNoWindow(rootDir) {
+  if (process.platform !== 'win32') return { ok: true, skipped: true }
   const targets = []
   const pnpmDir = path.join(rootDir, 'node_modules', '.pnpm')
   try {
@@ -923,7 +949,7 @@ async function installOfficialPackage({ nodeExe, toolsDir, targetDir, onProgress
   const registry = await pickRegistry(nodeExe)
   // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
   const toolchainEnv = execute && execute.env || null
-  const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
+  const envForCli = toolchainEnv || { ...process.env, PATH: platformRuntime.mergePath([path.dirname(nodeExe)], process.env.PATH || '') }
   // 动态解析最新版本号（latest/next 取新），解析失败回退标签
   let spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
   try {
@@ -984,7 +1010,7 @@ async function updateNpmPackage({ nodeExe, targetDir, toolsDir, onProgress, exec
   if (!pnpm) return { ok: false, message: '未找到 pnpm 且自举失败（网络或环境问题），请检查网络后重试' }
   // 白板原则：优先用调用方注入的工具链 env（内置 node/pnpm/npm/git PATH）；未注入时才拼 node 目录
   const toolchainEnv = execute && execute.env || null
-  const envForCli = toolchainEnv || { ...process.env, PATH: `${path.dirname(nodeExe)};${process.env.PATH || ''}` }
+  const envForCli = toolchainEnv || { ...process.env, PATH: platformRuntime.mergePath([path.dirname(nodeExe)], process.env.PATH || '') }
   // 动态解析最新版本号（latest/next 取新），解析失败回退标签
   let spec = `${DSH_NPM_PACKAGE}@${DSH_NPM_TAG}`
   try {
