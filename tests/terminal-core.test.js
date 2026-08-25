@@ -30,6 +30,31 @@ test('registry persists independent terminals and stable selection', () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('registry keeps installation ownership separate from runtime process ownership', () => {
+  const { dir, registry } = temporaryRegistry()
+  try {
+    const attached = registry.add({
+      id: 'attached-install',
+      port: 3080,
+      dshDir: path.join(dir, 'global-prefix'),
+      sourceType: 'scanned',
+    })
+    const managed = registry.add({
+      id: 'managed-install',
+      port: 3081,
+      dshDir: path.join(dir, 'terminals', 'managed', 'node_modules', '@deepseek-ai', 'dsh'),
+      sourceType: 'fresh-installed',
+    })
+    assert.equal(attached.installationOwnership, 'external')
+    assert.equal(managed.installationOwnership, 'managed')
+
+    const loaded = new TerminalRegistry(registry.filePath)
+    loaded.load()
+    assert.equal(loaded.get(attached.id).installationOwnership, 'external')
+    assert.equal(loaded.get(managed.id).installationOwnership, 'managed')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('registry save merges concurrent instances without overwriting each other', () => {
   const { dir, registry } = temporaryRegistry()
   try {

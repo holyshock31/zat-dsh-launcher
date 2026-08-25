@@ -2,7 +2,7 @@
 
 /* DSH 启动器 — 主进程（Electron） */
 
-const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, dialog, Menu, Tray } = require('electron')
 const { spawn, execFile } = require('node:child_process')
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
@@ -14,7 +14,7 @@ const { TerminalSupervisor, probePort } = require('./src/terminal-supervisor')
 const platformRuntime = require('./src/platform-runtime')
 const harnessUpdate = require('./src/harness-update')
 const { localInfo: harnessLocalInfo, checkUpdate: checkHarnessUpdate, installUpdate: installHarnessUpdate } = harnessUpdate
-const { inspectDshDir, scanDshInstallations, normalizeDshPath, normalizeNpmRoot, findRegisteredByDshDir, processEntries, findDshRootNear, findDshPackageRoots, isDshHomeDir } = require('./src/terminal-discovery')
+const { inspectDshDir, scanDshInstallations, normalizeDshPath, normalizeNpmRoot, findRegisteredByDshDir, findReusableEmptyTerminal, processEntries, findDshRootNear, findDshPackageRoots, isDshHomeDir } = require('./src/terminal-discovery')
 const freshInstall = require('./src/fresh-install')
 const engineManager = require('./src/engine-manager')
 const rescue = require('./src/rescue')
@@ -47,10 +47,7 @@ if (!gotSingleLock) {
 } else {
   app.on('second-instance', () => {
     try {
-      if (state.win) {
-        if (state.win.isMinimized()) state.win.restore()
-        state.win.focus()
-      }
+      showMainWindow()
     } catch { /* 忽略 */ }
   })
 }
@@ -106,8 +103,7 @@ function friendlyError(err) {
 }
 
 function looksLikeDshDir(dir) {
-  if (!dir || typeof dir !== 'string' || !fs.existsSync(dir)) return false
-  return fs.existsSync(path.join(dir, 'apps', 'cli')) || fs.existsSync(path.join(dir, 'package.json'))
+  return !!inspectDshDir(dir)
 }
 
 function normalizeConfig(partial) {
@@ -181,7 +177,7 @@ function applyConfig(obj, label) {
 // ---------------------------------------------------------------------------
 
 const state = {
-  settings: { autoRestart: true, autoOpen: true },
+  settings: { autoRestart: true, autoOpen: false },
   status: { running: false, pids: [], childPid: null, starting: false, stopping: false },
   logs: [],
   win: null,
@@ -1677,11 +1673,21 @@ async function connectDshDirectory(dshDirInput, sourceType = 'manual', options =
     const existing = findRegisteredByDshDir(inspected.dir, terminalRegistry.list())
     if (existing) return { ok: false, duplicate: true, terminalId: existing.id, message: `该 DSH 已接入：${existing.name} · :${existing.port}` }
   }
-  // 复用同目录的空终端登记（用户先按加号选了目录 → 空终端，现在目录里有 DSH 转为接入），
-  // 避免留下"fresh-empty 与已接入"两条同目录记录。
-  const emptyTwin = terminalRegistry && terminalRegistry.list().find(t =>
-    !t.dshDir && (t.sourceType === 'fresh-empty' || t.sourceType === 'fresh-installed-empty') &&
-    normalizeDshPath(normalizeNpmRoot(t.dshHome || '')) === normalizeDshPath(explicitHome || inspected.dir))
+  const inspectedMode = inspected.mode || 'source'
+  const usesSharedDshHome = inspectedMode === 'npx' || inspectedMode === 'npm-standalone' ||
+    sourceType === 'manual' || sourceType === 'attached' || sourceType === 'scanned' || sourceType === 'filesystem'
+  const reusableDshHome = explicitHome
+    ? explicitHome
+    : inspectedMode === 'npm'
+    ? inspected.dir
+    : usesSharedDshHome
+      ? resolveHome('')
+      : ''
+  // 复用同一安装位置或 DSH_HOME 的空终端。包括自动发现 ~/.dsh 后留下的 .dsh-web 占位登记。
+  const emptyTwin = terminalRegistry && findReusableEmptyTerminal(
+    terminalRegistry.list(),
+    [explicitHome, inspected.dir, reusableDshHome],
+    terminalRegistry.selectedTerminalId)
   let port = null
   let runningPid = null
   // 一次全量扫描同时完成两件事：① 判断用户选的 DSH 是否正在运行（外部启动 → 直接接管其端口）；
@@ -1722,18 +1728,12 @@ async function connectDshDirectory(dshDirInput, sourceType = 'manual', options =
   //    必须指向它自己，否则 Profile/引擎/会话检测会全部落空（启动器自己一键装的 D:\2 就是这种）。
   //  - 源码形态：DSH_HOME 指向其真实 home（默认 ~/.dsh）。
   // launcher 独立 home 只用于自建终端。
-  const inspectedMode = inspected.mode || 'source'
-  const dshHome = explicitHome
-    ? explicitHome
-    : inspectedMode === 'npm'
-    ? inspected.dir
-    : (inspectedMode === 'npx' || inspectedMode === 'npm-standalone' || sourceType === 'manual' || sourceType === 'attached' || sourceType === 'scanned' || sourceType === 'filesystem')
-      ? resolveHome('')
-      : path.join(app.getPath('userData'), 'terminals', id, 'dsh-home')
-  fs.mkdirSync(dshHome, { recursive: true })
+  // 自建终端必须使用最终登记 id 生成 home；外部接入的 dshHome 已在匹配空登记前确定。
+  const resolvedDshHome = reusableDshHome || path.join(app.getPath('userData'), 'terminals', id, 'dsh-home')
+  fs.mkdirSync(resolvedDshHome, { recursive: true })
   // 终端名 = 文件夹名，绝不带端口后缀
   const name = explicitHome ? (path.basename(explicitHome) || 'DSH') : inspected.name
-  const env = { id, name, dshHome, dshDir: inspected.dir, profileName: 'web', port, mirror: 'https://gh-proxy.com/', fallbackMirror: 'https://ghfast.top/', manual: true }
+  const env = { id, name, dshHome: resolvedDshHome, dshDir: inspected.dir, profileName: 'web', port, mirror: 'https://gh-proxy.com/', fallbackMirror: 'https://ghfast.top/', manual: true }
   if (emptyTwin) {
     const idx = ENVIRONMENTS.findIndex(item => item.id === id)
     if (idx >= 0) ENVIRONMENTS[idx] = env; else ENVIRONMENTS.push(env)
@@ -1742,8 +1742,8 @@ async function connectDshDirectory(dshDirInput, sourceType = 'manual', options =
   }
   // 空终端复用：更新已有登记（保留其 id/port/activeMs 历史）；否则新增登记
   const terminal = emptyTwin
-    ? terminalRegistry.update(id, { name, port, dshHome, dshDir: inspected.dir, profileName: 'web', sourceType })
-    : terminalRegistry.add({ id, name, port, dshHome, dshDir: inspected.dir, profileName: 'web', sourceType })
+    ? terminalRegistry.update(id, { name, port, dshHome: resolvedDshHome, dshDir: inspected.dir, profileName: 'web', sourceType, installationOwnership: 'external' })
+    : terminalRegistry.add({ id, name, port, dshHome: resolvedDshHome, dshDir: inspected.dir, profileName: 'web', sourceType, installationOwnership: 'external' })
   terminalSupervisor.startMonitoring(id)
   currentEnvId = id
   terminalRegistry.select(id)
@@ -1853,7 +1853,7 @@ async function envRemove(id) {
   if (!terminalRegistry || !terminalSupervisor || !terminalRegistry.get(id)) return { ok: false, message: '终端不存在' }
   const terminal = terminalRegistry.get(id)
   const runtime = terminalSupervisor.publicRuntime(id)
-  // 运行中/启动中：先停止再删除（删除 = 彻底清理：登记 + 进程 + 文件夹 + 日志）。
+  // 运行中/启动中：先停止再删除。外部安装只移除登记和启动器数据，安装目录始终保留。
   // 不再有「至少保留一个终端」的限制——用户有权删光（每个终端都是独立环境）。
   if (runtime.running || runtime.starting || runtime.stopping) {
     const stopped = await stopTerminal(id, { confirmAttached: true })
@@ -1875,7 +1875,7 @@ async function envRemove(id) {
   // 删除文件（0.6.29 实测定稿：DSH 目录 6.7 万文件，Windows 物理删除 15-17 秒，
   // 这是 NTFS 极限。做法：真实并行删除 + 实时进度 + 删干净才提示成功——
   // 绝不 rename 糊弄、绝不假成功、绝不报错甩给用户。占用文件杀进程后重试直到删净。）
-  sendDeletingState(id, true, '正在删除…')
+  sendDeletingState(id, true, plan.registrationOnly ? '正在移除接入…' : '正在删除…')
   try {
     // 1) 清杀仍持有句柄的进程（只杀命令行含目标路径的，绝不碰其它终端/3080）
     await killProcessesUsing(plan.roots)
@@ -1919,9 +1919,11 @@ async function envRemove(id) {
   saveUserConfig()
   emitTerminalSnapshot()
   const remain = plan.roots.filter(v => fs.existsSync(v))
-  const message = remain.length
-    ? `终端已删除，但 ${remain.length} 个目录仍被系统进程占用（如杀毒软件扫描）。已安排后台持续清理，重启启动器后必清`
-    : '已删除终端及其全部文件'
+  const message = plan.registrationOnly
+    ? '已移除终端接入；外部 DSH 安装目录和 DSH_HOME 数据均已保留'
+    : remain.length
+      ? `终端已删除，但 ${remain.length} 个目录仍被系统进程占用（如杀毒软件扫描）。已安排后台持续清理，重启启动器后必清`
+      : '已删除终端及其全部文件'
   return { ok: !remain.length, message, selectedTerminalId: next && next.id || '' }
 }
 
@@ -2802,16 +2804,17 @@ function registerIpc() {
     if (state.win.isMaximized()) state.win.unmaximize()
     else state.win.maximize()
   })
-  // 关闭启动器：先检查运行中的终端并提醒；确认后停止所有终端再退出，取消则全部保持运行
-  ipcMain.on('window:close', () => requestQuit())
+  // 标题栏 X 只隐藏到托盘；退出只能从托盘菜单明确触发。
+  ipcMain.on('window:close', () => hideMainWindow())
   ipcMain.on('window:quit-confirmed', async () => {
-    if (quitConfirmed) return
-    quitConfirmed = true
-    // 用户确认关闭 = 希望所有终端都不再运行：先逐个停止所有终端，再退出启动器
+    if (quitConfirmed || quitInProgress) return
+    quitInProgress = true
+    // 用户确认退出 = 希望所有终端都不再运行：先逐个停止所有终端，再退出启动器。
     await stopAllTerminals()
+    quitConfirmed = true
     app.quit()
   })
-  ipcMain.on('window:quit-cancelled', () => { quitConfirmed = false })
+  ipcMain.on('window:quit-cancelled', () => { quitInProgress = false })
 }
 
 // ---------------------------------------------------------------------------
@@ -2819,6 +2822,28 @@ function registerIpc() {
 // ---------------------------------------------------------------------------
 
 let quitConfirmed = false
+let quitInProgress = false
+let tray = null
+
+function showMainWindow() {
+  if (!state.win || state.win.isDestroyed()) {
+    createWindow()
+    return
+  }
+  const win = state.win
+  if (win.isMinimized()) win.restore()
+  if (!win.isVisible()) {
+    // show() 已经会聚焦窗口；再次 focus() 会让透明无边框窗口在 Windows 上重复呈现。
+    win.show()
+    return
+  }
+  if (!win.isFocused()) win.focus()
+}
+
+function hideMainWindow() {
+  if (!state.win || state.win.isDestroyed()) return
+  state.win.hide()
+}
 
 // 统计运行中/启动中/停止中的终端数量（与启动器是否持有 child 无关，attached 也算）
 function runningTerminalCount() {
@@ -2831,12 +2856,13 @@ function runningTerminalCount() {
   return count
 }
 
-// 关闭启动器入口（用户点 X 或 Alt+F4 触发）：有终端在运行则提醒；确认后停止所有终端再退出
+// 显式退出入口（仅托盘菜单触发）：有终端在运行则显示主窗口确认，确认后停止全部终端。
 function requestQuit() {
-  if (quitConfirmed) { app.quit(); return }
+  if (quitConfirmed || quitInProgress) return
   const running = runningTerminalCount()
   if (!state.win || state.win.isDestroyed()) { quitConfirmed = true; app.quit(); return }
   if (running > 0) {
+    showMainWindow()
     state.win.webContents.send('window:quit-request', running)
   } else {
     quitConfirmed = true
@@ -2849,6 +2875,21 @@ function requestQuit() {
 function forceQuit() {
   quitConfirmed = true
   app.quit()
+}
+
+function createTray() {
+  if (tray && !tray.isDestroyed()) return tray
+  const ico = path.join(__dirname, 'assets', 'icon.ico')
+  const png = path.join(__dirname, 'assets', 'icon.png')
+  tray = new Tray(process.platform === 'win32' && fs.existsSync(ico) ? ico : png)
+  tray.setToolTip('ZAT-DSH 启动器')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开主窗口', click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: '退出启动器', click: () => requestQuit() },
+  ]))
+  tray.on('click', () => showMainWindow())
+  return tray
 }
 
 // 用户确认关闭启动器 = 让所有终端停止：逐个停止（含 attached），全部完成后启动器退出
@@ -2868,6 +2909,9 @@ async function stopAllTerminals() {
 
 function createWindow() {
   Menu.setApplicationMenu(null)
+  // Electron 的透明分层窗口在 Windows 上经 hide/show 恢复时存在已知闪烁问题。
+  // Windows 11 可由 DWM 直接裁出原生圆角，不需要为圆角启用透明窗口。
+  const useTransparentWindow = process.platform !== 'win32'
   state.win = new BrowserWindow({
     width: 980,
     height: 680,
@@ -2878,11 +2922,12 @@ function createWindow() {
     frame: false,
     titleBarStyle: 'hidden',
     thickFrame: false,
+    roundedCorners: true,
     autoHideMenuBar: true,
-    transparent: true,
+    transparent: useTransparentWindow,
     hasShadow: false,
     resizable: true,
-    backgroundColor: '#00000000',
+    backgroundColor: useTransparentWindow ? '#00000000' : '#edf2fb',
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -2891,26 +2936,28 @@ function createWindow() {
       sandbox: false,
     },
   })
-  // 内容渲染完成后再显示窗口：避免透明窗口先出现、内容后渲染造成的“空白期/出框慢”观感
-  state.win.once('ready-to-show', () => { try { state.win.show() } catch { /* ignore */ } })
-  // 兜底：透明窗口偶发 ready-to-show 不触发，3 秒后强制显示，避免窗口永远不出现
-  setTimeout(() => {
+  const win = state.win
+  let initialWindowShown = false
+  win.once('show', () => { initialWindowShown = true })
+  const showInitialWindow = () => {
+    if (initialWindowShown || win.isDestroyed()) return
     try {
-      if (state.win && !state.win.isDestroyed() && !state.win.isVisible()) state.win.show()
+      win.show()
+      initialWindowShown = true
     } catch { /* ignore */ }
-  }, 3000)
+  }
+  // 内容渲染完成后再显示窗口；3 秒兜底也只负责首次显示，不能重新打开用户已隐藏的窗口。
+  win.once('ready-to-show', showInitialWindow)
+  setTimeout(showInitialWindow, 3000)
   state.win.loadFile(path.join(__dirname, 'renderer', 'index.v2.html'))
   state.win.on('maximize', () => state.win.webContents.send('window:maximized', true))
   state.win.on('unmaximize', () => state.win.webContents.send('window:maximized', false))
-  // 关闭保护：任何关闭路径（X 按钮 / Alt+F4 / 系统关窗）只要还有终端在运行就必须先确认。
-  // 已确认退出（quitConfirmed，含程序化 app.quit() 的 before-quit）则放行。
+  // 标题栏 X 由 IPC 直接 hide；Alt+F4 / 系统关闭按钮走这里，同样只隐藏到托盘。
+  // 只有托盘显式退出或程序化 app.quit() 才真正关闭窗口。
   state.win.on('close', (e) => {
     if (quitConfirmed || process.env.DSH_LAUNCHER_VISUAL_CHECK === '1') return
-    const running = runningTerminalCount()
-    if (running > 0) {
-      e.preventDefault()
-      requestQuit()
-    }
+    e.preventDefault()
+    hideMainWindow()
   })
   state.win.on('closed', () => { state.win = null })
   state.win.webContents.on('did-finish-load', () => {
@@ -2933,6 +2980,7 @@ app.whenReady().then(() => {
   initializeTerminalSupervisor()
   registerIpc()
   createWindow()
+  createTray()
   // 上次删除时被瞬时占用的残留文件：启动时静默补删一轮（进程最少、占用概率最低）
   flushPendingDeletes()
   // 实时会话活动流：每 3 秒增量读取运行中终端 DSH 的会话新帧，推送到对应终端控制台
@@ -2940,7 +2988,7 @@ app.whenReady().then(() => {
   setInterval(pollSessionActivity, 3000)
   pollSessionActivity()
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    showMainWindow()
   })
 })
 
@@ -2950,8 +2998,12 @@ app.on('window-all-closed', () => {
   app.quit()
 })
 
-// 程序化重启/收尾用：绕过关闭保护直接退出（供 Playwright 与内部重启调用）
-app.on('before-quit', () => { quitConfirmed = true })
+// 程序化重启/收尾用：绕过关闭保护直接退出（供 Playwright 与内部重启调用）。
+app.on('before-quit', () => {
+  quitConfirmed = true
+  if (tray && !tray.isDestroyed()) tray.destroy()
+  tray = null
+})
 
 // 崩溃兜底：单个终端的异步异常绝不能带走整个启动器
 process.on('uncaughtException', (err) => {

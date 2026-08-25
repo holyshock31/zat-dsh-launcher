@@ -18,13 +18,11 @@ const cache = new Map() // dshDir -> { ok, at }
 
 // dshCommand 逻辑（与 main.js 一致，避免循环依赖）：返回 { nodeExe, cli, built }
 function resolveCli(dshDir, nodeExe) {
-  const pkgFile = path.join(dshDir, 'package.json')
-  let pkg = null
-  try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')) } catch { /* 非 npm 包形态 */ }
-  if (pkg && pkg.name === '@deepseek-ai/dsh') {
-    // npm 包形态：lib/bin.js
-    return { cli: path.join(dshDir, 'lib', 'bin.js'), built: true }
-  }
+  // npm 包根（旧登记格式）或项目/全局 prefix（当前统一登记格式）。
+  const direct = path.join(dshDir, 'lib', 'bin.js')
+  if (fs.existsSync(direct)) return { cli: direct, built: true }
+  const nested = path.join(dshDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  if (fs.existsSync(nested)) return { cli: nested, built: true }
   // 源码形态：apps/cli/lib/bin.js（编译产物）或 apps/cli/src/bin.ts（tsx 运行）
   const compiled = path.join(dshDir, 'apps', 'cli', 'lib', 'bin.js')
   const source = path.join(dshDir, 'apps', 'cli', 'src', 'bin.ts')

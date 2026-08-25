@@ -167,6 +167,13 @@ img{user-select:none;-webkit-user-drag:none}
 .control-copy .eyebrow{color:rgba(255,255,255,.72)}
 .control-copy strong{font-size:20px;font-weight:750;color:#fff}
 .control-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.control-toggle{height:40px;display:inline-flex;align-items:center;gap:8px;color:#fff;font-size:12.5px;font-weight:650;white-space:nowrap;cursor:pointer;user-select:none}
+.control-toggle input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.control-toggle-track{position:relative;flex:none;width:34px;height:20px;border:1px solid rgba(255,255,255,.5);border-radius:10px;background:rgba(20,39,112,.3);transition:background .18s,border-color .18s}
+.control-toggle-track::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(20,39,112,.3);transition:transform .18s,background .18s}
+.control-toggle input:checked + .control-toggle-track{border-color:#fff;background:#fff}
+.control-toggle input:checked + .control-toggle-track::after{transform:translateX(14px);background:var(--blue-deep)}
+.control-toggle input:focus-visible + .control-toggle-track{outline:2px solid #fff;outline-offset:2px}
 
 /* 按钮 */
 .btn{

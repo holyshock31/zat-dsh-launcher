@@ -147,29 +147,48 @@ function npmPkgDir(dshDir) {
   return ''
 }
 
+function npmPackageInstallRoot(dshDir) {
+  const pkgDir = path.resolve(dshDir)
+  const scopeDir = path.dirname(pkgDir)
+  const nodeModulesDir = path.dirname(scopeDir)
+  if (path.basename(pkgDir).toLowerCase() !== 'dsh') return ''
+  if (path.basename(scopeDir).toLowerCase() !== '@deepseek-ai') return ''
+  if (path.basename(nodeModulesDir).toLowerCase() !== 'node_modules') return ''
+  return path.dirname(nodeModulesDir)
+}
+
 // 识别安装形态：npm 包（name=@deepseek-ai/dsh 且无 .git）还是 git 源码仓库。
-// dshDir 可能是包根（node_modules/@deepseek-ai/dsh，旧登记格式）或项目根（一键安装/扫描接入，
-// 根 package.json 只有 dependencies，DSH 包在 node_modules 里）——两者都识别为 npm 形态。
+// dshDir 可能是包根（node_modules/@deepseek-ai/dsh，旧登记格式）、项目根（一键安装），
+// 或没有根 package.json 的全局 npm 前缀——三者都识别为 npm 形态。
 function detectKind(dshDir) {
   if (!dshDir || typeof dshDir !== 'string') return { kind: 'invalid' }
   const pkgFile = path.join(dshDir, 'package.json')
-  if (!fs.existsSync(pkgFile)) return { kind: 'invalid' }
-  let pkg
-  try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')) } catch { return { kind: 'invalid' } }
-  // 包根形态：package.json 自身就是 dsh 包
-  if (pkg && pkg.name === '@deepseek-ai/dsh' && !fs.existsSync(path.join(dshDir, '.git'))) {
-    return { kind: 'npm', pkg }
+  const hasRootPackage = fs.existsSync(pkgFile)
+  let pkg = null
+  if (hasRootPackage) {
+    try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')) } catch { return { kind: 'invalid' } }
   }
-  // 项目根形态：根 package.json 依赖 @deepseek-ai/dsh，node_modules 里有包 → npm 形态
-  if (!fs.existsSync(path.join(dshDir, '.git'))) {
+  const hasGit = fs.existsSync(path.join(dshDir, '.git'))
+  // 包根形态：package.json 自身就是 dsh 包
+  if (pkg && pkg.name === '@deepseek-ai/dsh' && !hasGit) {
+    const installRoot = npmPackageInstallRoot(dshDir)
+    const standalone = !installRoot || !fs.existsSync(path.join(installRoot, 'package.json'))
+    return { kind: 'npm', pkg, standalone, managed: !standalone }
+  }
+  // 项目根或全局前缀：node_modules 里有完整 DSH 包。
+  if (!hasGit) {
     const pkgDir = npmPkgDir(dshDir)
     if (pkgDir) {
       try {
         const npmPkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
-        if (npmPkg && npmPkg.name === '@deepseek-ai/dsh') return { kind: 'npm', pkg: npmPkg }
+        if (npmPkg && npmPkg.name === '@deepseek-ai/dsh') {
+          const standalone = !hasRootPackage
+          return { kind: 'npm', pkg: npmPkg, standalone, managed: !standalone }
+        }
       } catch { /* 包损坏则按 git 分支走，最终由 git 命令给出明确错误 */ }
     }
   }
+  if (!pkg) return { kind: 'invalid' }
   return { kind: 'git', pkg }
 }
 
@@ -186,6 +205,8 @@ async function localInfo(dshDir, execute = run) {
       origin: '',
       dirty: false,
       dirtyCount: 0,
+      standalone: !!det.standalone,
+      managed: det.managed !== false,
     }
   }
   const [head, branch, status, origin] = await Promise.all([
@@ -263,6 +284,7 @@ async function checkUpdate(dshDir, execute = run, probeLatest = null) {
     }
     if (!remoteVersion) return { ...local, ok: true, checkFailed: true, updateAvailable: false, canInstall: false, message: '网络暂不可用，未完成更新检查' }
     const newer = compareVersions(remoteVersion, local.version) > 0
+    const canInstall = newer && local.managed !== false
     return {
       ...local,
       ok: true,
@@ -271,8 +293,10 @@ async function checkUpdate(dshDir, execute = run, probeLatest = null) {
       remoteVersion,
       behindCount: newer ? 1 : 0,
       updateAvailable: newer,
-      canInstall: newer,
-      message: newer ? `发现新版本 ${remoteVersion}（当前 ${local.version}）` : '当前已是最新版本',
+      canInstall,
+      message: newer
+        ? (canInstall ? `发现新版本 ${remoteVersion}（当前 ${local.version}）` : `发现新版本 ${remoteVersion}（当前 ${local.version}）；全局安装请使用原包管理器更新`)
+        : '当前已是最新版本',
     }
   }
   const remoteRef = `refs/remotes/zat-update/${local.branch}`
@@ -393,6 +417,7 @@ async function installUpdate(dshDir, snapshotDir, execute = run, options = {}) {
   if (!info.ok) return info
   if (info.kind === 'npm') {
     if (!info.updateAvailable) return { ...info, message: '当前已是最新版本' }
+    if (!info.canInstall) return { ...info, ok: false, message: info.message || '该 npm 安装不由启动器管理' }
     if (!options.npmUpdater) return { ...info, ok: false, message: 'npm 包形态更新器不可用' }
     fs.mkdirSync(snapshotDir, { recursive: true })
     fs.writeFileSync(path.join(snapshotDir, 'update.json'), `${JSON.stringify({ createdAt: Date.now(), dshDir, kind: 'npm', from: info.version, target: info.remoteVersion }, null, 2)}\n`, 'utf8')

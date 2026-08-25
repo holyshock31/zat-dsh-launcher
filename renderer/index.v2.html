@@ -75,6 +75,11 @@
           <strong>运行控制</strong>
         </div>
         <div class="control-actions">
+          <label class="control-toggle" for="switch-autoopen" title="控制手动启动成功后是否自动打开网页">
+            <input type="checkbox" id="switch-autoopen">
+            <span class="control-toggle-track" aria-hidden="true"></span>
+            <span>启动后打开网页</span>
+          </label>
           <button class="btn btn-primary" id="btn-start">▶ 启动</button>
           <button class="btn btn-ghost" id="btn-stop">■ 停止</button>
           <button class="btn btn-ghost" id="btn-restart">↻ 重启</button>
@@ -95,7 +100,7 @@
           <div class="panel" data-panel="empty" id="empty-panel">
             <div class="empty-state">
               <div class="empty-icon">⬇</div>
-              <strong class="empty-title">这个终端环境还没有安装 DSH</strong>
+              <strong class="empty-title">这个终端尚未接入 DSH</strong>
               <span class="empty-desc" id="empty-desc">选择安装方式，把 DeepSeek Harness 装到这个独立环境里（官方最新版，即装即用）。</span>
               <div class="empty-actions">
                 <button class="btn btn-primary" id="empty-install">一键安装</button>

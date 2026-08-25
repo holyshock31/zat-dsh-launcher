@@ -25,15 +25,13 @@ function normalizeNpmRoot(value) {
 //  - npm-standalone：全局 npm/pnpm 安装（包在 node_modules/@deepseek-ai/dsh，
 //    项目根没有 package.json 的独立安装）
 //  - npm：启动器一键安装的标准项目根（根有 package.json，profiles 就在其下）
-function classifyNpmMode(root, originalDir) {
+function classifyNpmMode(root) {
   const lowerRoot = root.toLowerCase()
   // npx 缓存特征：路径含 \_npx\ 或 /_npx/
   if (lowerRoot.includes('\\_npx\\') || lowerRoot.includes('/_npx/')) return 'npx'
-  // 从包根（node_modules/@deepseek-ai/dsh）归一化到项目根：检查项目根是否有 package.json。
-  // 没有则说明是全局安装的包管理前缀（如 %APPDATA%\npm），不是项目根。
-  if (originalDir && normalizeNpmRoot(originalDir) !== originalDir) {
-    if (!fs.existsSync(path.join(root, 'package.json'))) return 'npm-standalone'
-  }
+  // 全局安装前缀（如 %ProgramFiles%\nodejs、%APPDATA%\npm、/usr/local/lib）
+  // 没有项目 package.json；启动器一键安装和普通 npm 项目根则有。
+  if (!fs.existsSync(path.join(root, 'package.json'))) return 'npm-standalone'
   return 'npm'
 }
 
@@ -190,10 +188,9 @@ function inspectDshDir(value) {
   if (!value || typeof value !== 'string') return null
   const dir = path.resolve(value)
   const packageFile = path.join(dir, 'package.json')
-  if (!fs.existsSync(packageFile)) return null
   // 源码形态：根 package.json + apps/cli
   const cliDir = path.join(dir, 'apps', 'cli')
-  if (fs.existsSync(cliDir)) {
+  if (fs.existsSync(packageFile) && fs.existsSync(cliDir)) {
     try {
       const pkg = JSON.parse(fs.readFileSync(packageFile, 'utf8'))
       if (pkg.name !== '@deepseek-ai/dsh-root' && !Array.isArray(pkg.workspaces)) return null
@@ -207,7 +204,7 @@ function inspectDshDir(value) {
     try {
       const pkg = JSON.parse(fs.readFileSync(npmPkgFile, 'utf8'))
       if (pkg.name !== '@deepseek-ai/dsh' || !pkg.bin || !pkg.bin.dsh) return null
-      const mode = classifyNpmMode(dir, dir)
+      const mode = classifyNpmMode(dir)
       const displayName = mode === 'npx' || mode === 'npm-standalone'
         ? `@deepseek-ai/dsh v${pkg.version || '未知'}`
         : path.basename(dir) || 'DeepSeek Harness'
@@ -223,7 +220,7 @@ function inspectDshDir(value) {
       const pkg = JSON.parse(fs.readFileSync(selfPkgFile, 'utf8'))
       if (pkg.name === '@deepseek-ai/dsh' && pkg.bin && pkg.bin.dsh) {
         const root = normalizeNpmRoot(dir)
-        const mode = classifyNpmMode(root, dir)
+        const mode = classifyNpmMode(root)
         const displayName = mode === 'npx' || mode === 'npm-standalone'
           ? `@deepseek-ai/dsh v${pkg.version || '未知'}`
           : path.basename(root) || 'DeepSeek Harness'
@@ -400,6 +397,19 @@ function findRegisteredByDshDir(dshDir, terminals) {
   return terminals.find(terminal => normalizeDshPath(normalizeNpmRoot(terminal.dshDir || '')) === key) || null
 }
 
+// 扫描/手动接入时复用同一安装位置或 DSH_HOME 对应的空登记，避免留下占位终端。
+function findReusableEmptyTerminal(terminals, candidateHomes, selectedTerminalId = '') {
+  if (!Array.isArray(terminals) || !Array.isArray(candidateHomes)) return null
+  const keys = new Set(candidateHomes
+    .filter(value => typeof value === 'string' && value.trim())
+    .map(value => normalizeDshPath(normalizeNpmRoot(value))))
+  if (!keys.size) return null
+  const matches = terminals.filter(terminal =>
+    terminal && !terminal.dshDir && terminal.dshHome &&
+    keys.has(normalizeDshPath(normalizeNpmRoot(terminal.dshHome))))
+  return matches.find(terminal => terminal.id === selectedTerminalId) || matches[0] || null
+}
+
 // 纯函数：避开已登记与已预留端口，返回第一个空闲端口；isPortFree 缺省视为全空闲
 function firstFreePortAvoiding(registeredPorts = [], reservedPorts = [], isPortFree = () => true, start = 3080) {
   const taken = new Set()
@@ -531,6 +541,7 @@ module.exports = {
   instanceFromCommandLine,
   rootsFromCommandLine,
   findRegisteredByDshDir,
+  findReusableEmptyTerminal,
   firstFreePortAvoiding,
   scanDshInstallations,
   extraScanRoots,

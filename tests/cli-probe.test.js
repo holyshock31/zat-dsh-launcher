@@ -14,7 +14,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { cliNoOpenSupported, forceNoOpenUnsupported } = require('../src/cli-probe')
+const { cliNoOpenSupported, forceNoOpenUnsupported, resolveCli } = require('../src/cli-probe')
 
 // 模拟 CLI：真实启动（不带 --help）时是否拒绝 --no-open。
 // rejectOnRealStart=true → 打印 "error: unknown option '--no-open'" 退出 1（rc.7/rc.8 npm 包行为）；
@@ -50,6 +50,24 @@ test('returns false for missing CLI (conservative: omit flag, never fail startup
   try {
     assert.equal(await cliNoOpenSupported(dir, process.execPath, { timeoutMs: 5000 }), false)
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('global npm prefix resolves and probes its nested DSH CLI', async () => {
+  const prefix = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-probe-global-'))
+  try {
+    const pkgDir = path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh')
+    const cli = path.join(pkgDir, 'lib', 'bin.js')
+    fs.mkdirSync(path.dirname(cli), { recursive: true })
+    fs.writeFileSync(cli, 'console.error("error: unknown option \'--no-open\'"); process.exit(1);', 'utf8')
+    fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh',
+      version: '0.1.1-rc.2',
+      bin: { dsh: 'lib/bin.js' },
+    }), 'utf8')
+
+    assert.deepEqual(resolveCli(prefix, process.execPath), { cli, built: true })
+    assert.equal(await cliNoOpenSupported(prefix, process.execPath, { timeoutMs: 5000 }), false)
+  } finally { fs.rmSync(prefix, { recursive: true, force: true }) }
 })
 
 test('forceNoOpenUnsupported overrides cache so next start omits the flag', async () => {

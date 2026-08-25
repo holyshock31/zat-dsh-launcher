@@ -213,10 +213,13 @@ async function selectTerminal(id) {
 function updateTerminalButtons() {
   if (!els.removeTerminal) return
   const terminal = state.terminals.find(item => item.id === state.selectedTerminalId)
-  const runtime = terminal && terminal.runtime || {}
   // 删除不再限制「至少保留一个」；运行中也会先停止再删（主进程处理），所以始终可点
   els.removeTerminal.disabled = !terminal
-  els.removeTerminal.title = terminal ? '删除当前终端（登记 + 进程 + 文件夹 + 日志，彻底清理）' : ''
+  els.removeTerminal.title = terminal
+    ? (terminal.installationOwnership === 'external'
+        ? '移除当前终端接入（保留外部 DSH 安装及数据）'
+        : '删除当前终端（登记 + 进程 + 文件夹 + 日志，彻底清理）')
+    : ''
 }
 function renderTerminalSnapshot(snapshot) {
   if (!snapshot) return
@@ -269,13 +272,10 @@ function renderEmptyState(terminal) {
     const activeTab = document.querySelector('.tab.active')?.dataset.tab || 'console'
     switchTab(activeTab)
   }
-  // 首次使用（无任何终端）显示扫描/手动；已有终端后只留一键安装
-  const hasTerminal = (state.terminals || []).length > 0
-  if (els.emptyScan) els.emptyScan.hidden = hasTerminal
-  if (els.emptyManual) els.emptyManual.hidden = hasTerminal
-  if (els.emptyDesc) els.emptyDesc.textContent = hasTerminal
-    ? '这个新环境还没有安装 DSH。点「一键安装」下载官方最新版到独立目录（即装即用）。'
-    : '选择安装方式，把 DeepSeek Harness 装到这个独立环境里。'
+  // 空登记本身不能证明机器上没有 DSH；始终保留扫描和手动接入入口。
+  if (els.emptyScan) els.emptyScan.hidden = false
+  if (els.emptyManual) els.emptyManual.hidden = false
+  if (els.emptyDesc) els.emptyDesc.textContent = '可安装新的 DSH，或接入本机已有安装。'
 }
 function renderPaths(p) { state.paths = p || {}; els.envPath.textContent = `DSH 目录：${p.dshDir || '未设置'}` }
 // ---- 大肥鱼帧动画：停止显示静止帧，运行中循环播放走路帧（透明羽化 PNG，无方块边缘）----
@@ -679,16 +679,16 @@ function switchTab(name) {
   if (a) { els.indicator.style.width = `${a.offsetWidth}px`; els.indicator.style.transform = `translateX(${a.offsetLeft}px)` }
 }
 
-// ---- 添加终端向导（入口随终端数量动态变化；复制功能已废案移除）----
+// ---- 添加终端向导（复制功能已废案移除）----
 const WIZARD_VIEWS = {
   menu() {
     els.wizardTitle.textContent = '添加终端'
     els.wizardBack.hidden = true
-    const hasTerminal = (state.terminals || []).length > 0
+    const hasConfiguredTerminal = (state.terminals || []).some(terminal => terminal && terminal.dshDir)
     const fresh = `
       <div class="wizard-option" data-action="fresh">
         <div class="wizard-option-icon">⬇</div>
-        <div class="wizard-option-copy"><strong>${hasTerminal ? '一键安装新的 DSH' : '一键全新安装'}</strong><span>下载官方最新版到独立环境，注入插件商店，全新干净</span></div>
+        <div class="wizard-option-copy"><strong>${hasConfiguredTerminal ? '一键安装新的 DSH' : '一键全新安装'}</strong><span>下载官方最新版到独立环境，注入插件商店，全新干净</span></div>
         <span class="wizard-option-arrow">›</span>
       </div>`
     const scan = `
@@ -703,11 +703,10 @@ const WIZARD_VIEWS = {
         <div class="wizard-option-copy"><strong>手动选择 DSH 目录</strong><span>在文件对话框中指定 Harness 根目录</span></div>
         <span class="wizard-option-arrow">›</span>
       </div>`
-    const intro = hasTerminal
-      ? '已有一个正常运转的 DSH。新终端环境可以这样建立：'
-      : '首次使用：请选择如何接入第一个 DeepSeek Harness。'
-    // 有终端：只留「一键安装新的」；首次使用：三入口
-    els.wizardBody.innerHTML = `<div class="wizard-intro">${intro}</div>${fresh}${hasTerminal ? '' : scan + manual}`
+    const intro = hasConfiguredTerminal
+      ? '添加新的 DeepSeek Harness 终端。'
+      : '请选择如何接入 DeepSeek Harness。'
+    els.wizardBody.innerHTML = `<div class="wizard-intro">${intro}</div>${fresh}${scan}${manual}`
     els.wizardBody.querySelectorAll('.wizard-option').forEach(option => {
       option.onclick = () => wizardAction(option.dataset.action)
     })
@@ -956,15 +955,20 @@ async function init() {
     const id = state.selectedTerminalId
     const terminal = state.terminals.find(item => item.id === id)
     if (!terminal) return
+    const externalInstall = terminal.installationOwnership === 'external'
     const running = terminal.runtime && (terminal.runtime.running || terminal.runtime.starting)
     const runWarn = running ? '\n\n注意：该终端正在运行，删除时会先停止它。' : ''
     const p3080 = terminal.port === 3080 || (terminal.runtime && terminal.runtime.ownership === 'attached' && terminal.port === 3080)
     const dshWarn = p3080 ? '\n\n警告：:3080 是当前 DeepSeek Harness 对话的宿主，删除会停止它并中断正在进行的对话！' : ''
-    if (!await confirm('删除终端及文件', `确定彻底删除「${terminal.name} · :${terminal.port}」吗？\n\n将删除：终端登记、运行进程、安装目录文件夹、日志、对话记录。\n与其他终端共享的路径会被保护，不会删除。${runWarn}${dshWarn}`)) return
+    const title = externalInstall ? '移除已接入终端' : '删除终端及文件'
+    const scope = externalInstall
+      ? '将移除：终端登记、启动器日志和救援数据。\n外部 DSH 安装目录及 DSH_HOME 数据会保留。'
+      : '将删除：终端登记、运行进程、安装目录文件夹、日志、对话记录。\n与其他终端共享的路径会被保护，不会删除。'
+    if (!await confirm(title, `确定${externalInstall ? '移除' : '彻底删除'}「${terminal.name} · :${terminal.port}」吗？\n\n${scope}${runWarn}${dshWarn}`)) return
     // 删除中：按钮保持 "−"，进度由 terminal:deleting 事件实时更新（替换式 toast，
     // 显示"已删除 N/M 个文件"，删干净才提示完成——不糊弄、不假成功）。
     els.removeTerminal.disabled = true
-    deleteToast(`正在删除「${terminal.name}」…`)
+    deleteToast(`正在${externalInstall ? '移除' : '删除'}「${terminal.name}」…`)
     try {
       const result = await api.envRemove(id)
       clearDeleteToast()

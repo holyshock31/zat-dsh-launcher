@@ -16,6 +16,7 @@ test('detectKind: npm package install vs git source checkout', () => {
   try {
     const npmPkg = path.join(dir, 'node_modules', '@deepseek-ai', 'dsh')
     fs.mkdirSync(npmPkg, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@deepseek-ai/dsh': '0.1.0-rc.7' } }))
     fs.writeFileSync(path.join(npmPkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.0-rc.7' }))
     assert.equal(detectKind(npmPkg).kind, 'npm')
 
@@ -48,11 +49,51 @@ test('detectKind: 项目根 npm 形态（扫描接入的一键安装终端，如
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('global npm prefix reports its version but is not updated as a managed install', async () => {
+  const prefix = tmpDir('global-prefix')
+  try {
+    const npmPkg = path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh')
+    fs.mkdirSync(path.join(npmPkg, 'lib'), { recursive: true })
+    fs.writeFileSync(path.join(npmPkg, 'lib', 'bin.js'), 'x\n')
+    fs.writeFileSync(path.join(npmPkg, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh',
+      version: '0.1.0-rc.7',
+      bin: { dsh: 'lib/bin.js' },
+    }))
+
+    const det = detectKind(prefix)
+    assert.equal(det.kind, 'npm')
+    assert.equal(det.standalone, true)
+    assert.equal(det.managed, false)
+
+    // 旧登记可能仍保存包根；它也必须识别为同一个非托管全局安装。
+    const legacyDet = detectKind(npmPkg)
+    assert.equal(legacyDet.kind, 'npm')
+    assert.equal(legacyDet.standalone, true)
+    assert.equal(legacyDet.managed, false)
+
+    const execute = async () => { throw new Error('global npm form must not run git') }
+    const info = await localInfo(prefix, execute)
+    assert.equal(info.ok, true)
+    assert.equal(info.version, '0.1.0-rc.7')
+    assert.equal(info.standalone, true)
+
+    const update = await checkUpdate(prefix, execute, async () => '0.1.0-rc.8')
+    assert.equal(update.updateAvailable, true)
+    assert.equal(update.canInstall, false)
+
+    const legacyUpdate = await checkUpdate(npmPkg, execute, async () => '0.1.0-rc.8')
+    assert.equal(legacyUpdate.updateAvailable, true)
+    assert.equal(legacyUpdate.canInstall, false)
+  } finally { fs.rmSync(prefix, { recursive: true, force: true }) }
+})
+
 test('localInfo reports npm package form without git commands', async () => {
   const dir = tmpDir('local')
   try {
     const npmPkg = path.join(dir, 'node_modules', '@deepseek-ai', 'dsh')
     fs.mkdirSync(npmPkg, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@deepseek-ai/dsh': '0.1.0-rc.7' } }))
     fs.writeFileSync(path.join(npmPkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.0-rc.7' }))
     const execute = async () => { throw new Error('npm form must not run git') }
     const info = await localInfo(npmPkg, execute)
@@ -68,6 +109,7 @@ test('checkUpdate npm form detects newer registry version', async () => {
   try {
     const npmPkg = path.join(dir, 'node_modules', '@deepseek-ai', 'dsh')
     fs.mkdirSync(npmPkg, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@deepseek-ai/dsh': '0.1.0-rc.7' } }))
     fs.writeFileSync(path.join(npmPkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.0-rc.7' }))
     const probe = async () => '0.1.0-rc.8'
     const result = await checkUpdate(npmPkg, undefined, probe)
@@ -99,6 +141,7 @@ test('installUpdate npm form invokes npmUpdater and reports new version', async 
   try {
     const npmPkg = path.join(dir, 'node_modules', '@deepseek-ai', 'dsh')
     fs.mkdirSync(npmPkg, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@deepseek-ai/dsh': '0.1.0-rc.7' } }))
     fs.writeFileSync(path.join(npmPkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.0-rc.7' }))
     let called = false
     const result = await installUpdate(npmPkg, path.join(dir, 'snap'), undefined, {

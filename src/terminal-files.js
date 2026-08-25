@@ -3,6 +3,13 @@
 const path = require('node:path')
 const os = require('node:os')
 
+const MANAGED_INSTALL_SOURCE_TYPES = new Set([
+  'fresh-empty',
+  'fresh-installed-empty',
+  'fresh-installed',
+  'cloned',
+])
+
 function normalizeNonEmpty(value) {
   const text = String(value || '').trim()
   return text ? path.resolve(text) : ''
@@ -25,6 +32,15 @@ function uniqueTopRoots(values) {
   return roots.filter(root => !roots.some(other => other !== root && isSameOrInside(other, root)))
 }
 
+// 安装文件归属与进程 ownership 是两件事：前者决定删除登记时能否碰安装目录，
+// 后者只描述当前进程是否由启动器拉起。旧登记没有该字段时按来源保守推断。
+function installationOwnership(terminal) {
+  const explicit = String(terminal && terminal.installationOwnership || '')
+  if (explicit === 'managed' || explicit === 'external') return explicit
+  const sourceType = String(terminal && terminal.sourceType || 'manual')
+  return MANAGED_INSTALL_SOURCE_TYPES.has(sourceType) ? 'managed' : 'external'
+}
+
 function planTerminalDeletion(terminal, others, userData) {
   const home = normalizeNonEmpty(terminal.dshHome)
   const dshDir = normalizeNonEmpty(terminal.dshDir)
@@ -38,6 +54,12 @@ function planTerminalDeletion(terminal, others, userData) {
     return first ? path.join(terminalsRoot, first) : ''
   }
   let roots = []
+
+  // 手动选择、自动扫描、运行实例接入的 DSH 都不属于启动器。
+  // 删除终端仅移除登记和启动器自身数据，绝不能递归删除源码仓库、npx 缓存或全局 npm prefix。
+  if (installationOwnership(terminal) === 'external') {
+    return { registrationOnly: true, roots: [], blocked: false, reason: 'external-install' }
+  }
 
   if (sourceType === 'fresh-empty') {
     roots = [home]
@@ -64,4 +86,4 @@ function planTerminalDeletion(terminal, others, userData) {
   return { registrationOnly: false, roots, blocked: false, reason: '' }
 }
 
-module.exports = { normalizeNonEmpty, isSameOrInside, pathsOverlap, planTerminalDeletion }
+module.exports = { normalizeNonEmpty, isSameOrInside, pathsOverlap, installationOwnership, planTerminalDeletion }

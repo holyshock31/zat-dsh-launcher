@@ -3,6 +3,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const { installationOwnership } = require('./terminal-files')
 
 function normalizePath(value) {
   return path.resolve(String(value || '')).replace(/[\\/]+$/, '').toLowerCase()
@@ -22,14 +23,17 @@ function normalizeTerminal(input) {
   const port = Number(input.port)
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('终端端口无效')
   const id = String(input.id || `terminal-${crypto.randomUUID()}`)
+  const dshDir = String(input.dshDir || '')
+  const sourceType = String(input.sourceType || 'manual')
   return {
     id,
     name: String(input.name || `终端 ${port}`),
     port,
-    dshDir: String(input.dshDir || ''),
+    dshDir,
     dshHome: String(input.dshHome || ''),
     profileName: String(input.profileName || 'web'),
-    sourceType: String(input.sourceType || 'manual'),
+    sourceType,
+    installationOwnership: installationOwnership({ ...input, dshDir, sourceType }),
     ownership: input.ownership === 'attached' ? 'attached' : 'managed',
     // 启动器最后一次 spawn 的 DSH 进程 PID；用于重启后识别「自己的 detached 终端」，避免误判为外部接入。
     managedPid: Number.isSafeInteger(Number(input.managedPid)) && Number(input.managedPid) > 0 ? Number(input.managedPid) : null,

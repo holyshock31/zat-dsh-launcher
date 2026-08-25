@@ -8,11 +8,20 @@ const { planTerminalDeletion, pathsOverlap } = require('../src/terminal-files')
 
 const userData = path.resolve('C:\\Users\\tester\\AppData\\Roaming\\dsh-launcher')
 
-test('manual/scanned terminal deletion removes its install dir but keeps shared default home', () => {
+test('attached installations are registration-only and never expose external roots for deletion', () => {
   const defaultHome = path.join(os.homedir(), '.dsh')
-  const plan = planTerminalDeletion({ id: 'm', sourceType: 'manual', dshHome: defaultHome, dshDir: 'D:\\deepseek-harness' }, [], userData)
-  assert.equal(plan.blocked, false)
-  assert.deepEqual(plan.roots, [path.resolve('D:\\deepseek-harness')])
+  const externalRoots = [
+    { sourceType: 'manual', dshDir: path.join(os.tmpdir(), 'deepseek-harness-source') },
+    { sourceType: 'scanned', dshDir: path.join(os.tmpdir(), 'node-prefix') },
+    { sourceType: 'filesystem', dshDir: path.join(os.tmpdir(), 'npm-cache', '_npx', 'hash') },
+    { sourceType: 'attached', dshDir: path.join(os.tmpdir(), 'global-npm-prefix') },
+  ]
+  for (const terminal of externalRoots) {
+    const plan = planTerminalDeletion({ id: 'external', dshHome: defaultHome, ...terminal }, [], userData)
+    assert.equal(plan.blocked, false)
+    assert.equal(plan.registrationOnly, true)
+    assert.deepEqual(plan.roots, [])
+  }
 })
 
 test('fresh-empty terminals in different 3 and 4 folders are independently deletable', () => {
@@ -20,6 +29,7 @@ test('fresh-empty terminals in different 3 and 4 folders are independently delet
   const terminal4 = { id: 't4', sourceType: 'fresh-empty', dshHome: 'C:\\Users\\tester\\Desktop\\4', dshDir: '' }
   const plan = planTerminalDeletion(terminal3, [terminal4], userData)
   assert.equal(plan.blocked, false)
+  assert.equal(plan.registrationOnly, false)
   assert.deepEqual(plan.roots, [path.resolve(terminal3.dshHome)])
 })
 

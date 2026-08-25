@@ -14,6 +14,7 @@ const {
   instanceFromCommandLine,
   rootsFromCommandLine,
   findRegisteredByDshDir,
+  findReusableEmptyTerminal,
   firstFreePortAvoiding,
   scanDshInstallations,
   findDshRootNear,
@@ -232,6 +233,26 @@ test('findRegisteredByDshDir 大小写不敏感判重', () => {
   assert.equal(findRegisteredByDshDir('', terminals), null)
 })
 
+test('findReusableEmptyTerminal reuses discovered DSH_HOME placeholders', () => {
+  const home = path.join(os.tmpdir(), '.dsh')
+  const terminals = [
+    { id: 'configured', dshDir: path.join(os.tmpdir(), 'installed'), dshHome: home },
+    { id: '.dsh-web', dshDir: '', dshHome: home, sourceType: 'scanned' },
+    { id: 'other-empty', dshDir: '', dshHome: path.join(os.tmpdir(), 'other') },
+  ]
+  assert.equal(findReusableEmptyTerminal(terminals, [home]).id, '.dsh-web')
+  assert.equal(findReusableEmptyTerminal(terminals, [path.join(os.tmpdir(), 'missing')]), null)
+})
+
+test('findReusableEmptyTerminal prefers the selected matching placeholder', () => {
+  const home = path.join(os.tmpdir(), '.dsh')
+  const terminals = [
+    { id: 'first', dshDir: '', dshHome: home },
+    { id: 'selected', dshDir: '', dshHome: home },
+  ]
+  assert.equal(findReusableEmptyTerminal(terminals, [home], 'selected').id, 'selected')
+})
+
 test('firstFreePortAvoiding 避开已登记与已预留端口', () => {
   assert.equal(firstFreePortAvoiding([3080], [3081, 3083]), 3082)
   assert.equal(firstFreePortAvoiding([], [], port => port !== 3084, 3080), 3080)
@@ -361,7 +382,7 @@ test('inspectDshDir identifies npx cache installs', () => {
 })
 
 // 1.0.14: global npm installs (package under a prefix without root package.json) use ~/.dsh
-test('inspectDshDir identifies global npm installs', () => {
+test('global npm scan results remain valid for connection', async () => {
   const prefix = fs.mkdtempSync(path.join(os.tmpdir(), 'zat-global-'))
   try {
     const pkgDir = path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh')
@@ -372,6 +393,20 @@ test('inspectDshDir identifies global npm installs', () => {
     assert.ok(r, 'global package root should be recognized')
     assert.equal(r.mode, 'npm-standalone')
     assert.equal(path.resolve(r.dir).toLowerCase(), prefix.toLowerCase())
+
+    // The scanner exposes r.dir to the UI, and connection validates that path again.
+    const normalized = inspectDshDir(r.dir)
+    assert.ok(normalized, 'normalized global prefix should remain recognizable')
+    assert.equal(normalized.mode, 'npm-standalone')
+
+    const results = await scanDshInstallations({
+      explicit: [pkgDir],
+      processEntries: [],
+      scanDrives: false,
+    })
+    assert.equal(results.length, 1)
+    assert.equal(path.resolve(results[0].dir).toLowerCase(), prefix.toLowerCase())
+    assert.ok(inspectDshDir(results[0].dir), 'scan result should be accepted by connection validation')
   } finally { fs.rmSync(prefix, { recursive: true, force: true }) }
 })
 
